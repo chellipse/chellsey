@@ -216,6 +216,8 @@ pub fn pp_tokenize(s: &[char]) -> Vec<PPToken<'_>> {
 
         // maximal munch, no token precedence aside from
         // header-name / string-literal as described in 6.4 paragraph 4
+        // the header-name > string-literal precedence comes from initial options
+        // order, since sort is stable
         options.sort_by(|a, b| b.0.cmp(&a.0));
         if let Some(last) = options.get(0) {
             let len = last.0;
