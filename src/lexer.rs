@@ -443,7 +443,8 @@ fn dfa_ucn(s: &[char]) -> Result<usize, String> {
 
 fn dfa_other(s: &[char]) -> Result<usize, String> {
     match s.get(0) {
-        Some(' ' | '\n') => Err("Invalid".to_string()),
+        // vertical-tab and form-feed
+        Some(' ' | '\t' | '\n' | '\x0B' | '\x0C') => Err("Invalid".to_string()),
         Some(_) => Ok(1),
         None => Err("EOF".to_string()),
     }
