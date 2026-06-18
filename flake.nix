@@ -30,15 +30,15 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          rust = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [ "rust-src" ];
-          };
-          # rust = pkgs.rust-bin.selectLatestNightlyWith (
-          #   toolchain:
-          #   toolchain.default.override {
-          #     extensions = [ "rust-src" ];
-          #   }
-          # );
+          # rust = pkgs.rust-bin.stable.latest.default.override {
+          #   extensions = [ "rust-src" ];
+          # };
+          rust = pkgs.rust-bin.selectLatestNightlyWith (
+            toolchain:
+            toolchain.default.override {
+              extensions = [ "rust-src" ];
+            }
+          );
           libPath =
             with pkgs;
             lib.makeLibraryPath [
