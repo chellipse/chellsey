@@ -176,7 +176,12 @@ pub fn pp_tokenize(s: &[char]) -> Vec<PPToken<'_>> {
     let mut result = Vec::new();
 
     while i < s.len() {
-        let slice = &s[i..];
+        let mut slice = &s[i..];
+        while let Some(l) = dfa_comment(slice).ok() {
+            i += l;
+            slice = &s[i..];
+        }
+
         // TODO: need more line state here
         if let Some(l) = dfa_header_name(slice).ok() {
             if let Some(&['i', 'n', 'c', 'l', 'u', 'd', 'e'] | &['e', 'm', 'b', 'e', 'd']) =
@@ -644,6 +649,44 @@ fn dfa_punctuator(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
+fn dfa_comment(s: &[char]) -> Result<usize, String> {
+    #[derive(Debug)]
+    enum St {
+        Ent,
+        Slash,
+        LC,
+        MLC,
+        EMLC,
+        Term,
+    }
+    let mut st = St::Ent;
+    let mut result = None;
+    let mut last = None;
+
+    for (i, c) in s.iter().enumerate() {
+        st = match (&st, c) {
+            (St::Ent, '/') => St::Slash,
+            (St::Slash, '/') => St::LC,
+            (St::LC, '\n') => break,
+            (St::LC, _) => St::LC,
+            (St::Slash, '*') => St::MLC,
+            (St::MLC, '*') => St::EMLC,
+            (St::MLC, _) => St::MLC,
+            (St::EMLC, '/') => St::Term,
+            (St::EMLC, _) => St::MLC,
+            _ => break,
+        };
+
+        if matches!(st, St::LC | St::Term) {
+            result = Some(i)
+        }
+
+        last = Some(i);
+    }
+
+    result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +707,16 @@ mod tests {
                 "f({input:?}) -> {result:?} != f({input:?}) -> {expected:?}",
             )
         }
+    }
+
+    #[test]
+    fn comment() {
+        let assert_eq = assert_eq_wrapper(dfa_comment);
+
+        assert_eq("//  \n", Some("//  "));
+        assert_eq("/**/  ", Some("/**/"));
+        assert_eq(" //  \n", None);
+        assert_eq(" /**/  ", None);
     }
 
     #[test]
