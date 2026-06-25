@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 constcat = "0.6.1"
+elsa = { version = "1.11.2", features = ["indexmap"] }
+libc = "0.2.186"
 strum = "0.28.0"
 strum_macros = "0.28.0"

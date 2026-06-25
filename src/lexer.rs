@@ -1,7 +1,14 @@
-use std::fmt::Write;
-
 /// Does not currently handle [UAX #31](https://www.unicode.org/reports/tr31/)
+use std::{
+    fmt::Write,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{anyhow, Result};
 use constcat::concat_slices;
+use elsa::{index_set::FrozenIndexSet, FrozenVec};
 use strum_macros::EnumString;
 
 // 6.4.1
@@ -149,44 +156,120 @@ impl std::fmt::Debug for PPToken<'_> {
     }
 }
 
-pub fn lex(s: &str) {
-    let mut vec = Vec::new();
-    let mut iter = s.chars().peekable();
+#[derive(Default)]
+pub struct Lexer {
+    char_contents: FrozenVec<Box<[char]>>,
+    paths_opened: FrozenIndexSet<PathBuf>,
+}
 
-    loop {
-        match (iter.next(), iter.peek()) {
-            (Some('\\'), Some('\n')) => {
-                iter.next();
+impl Lexer {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    fn open(&self, path: impl AsRef<Path>) -> Result<&[char]> {
+        let path = path.as_ref().to_path_buf();
+        if self.paths_opened.get(&path).is_some() {
+            // TODO: as long as we do serial depth first inclusion i think we
+            // can just ignore repeated paths since they are already in the
+            // file
+            Err(anyhow!(
+                "File has already been opened! No include recursion!!!"
+            ))
+        } else {
+            let mut f = File::open(path)?;
+            let mut buf = String::new();
+            f.read_to_string(&mut buf)?;
+
+            let mut vec = Vec::new();
+            // phase 1
+            let mut iter = buf.chars().peekable();
+
+            // phase 2
+            loop {
+                match (iter.next(), iter.peek()) {
+                    (Some('\\'), Some('\n')) => {
+                        iter.next();
+                    }
+                    (Some(c), _) => {
+                        vec.push(c);
+                    }
+                    (None, _) => break,
+                }
             }
-            (Some(c), _) => {
-                vec.push(c);
+
+            // partial phase 3, replacing comments with spaces
+            let mut i = 0;
+            while i < vec.len() {
+                if let Some(l) = dfa_comment(&vec[i..]).ok() {
+                    // println!(
+                    //     "REMOVAING COMMENT: {:?}",
+                    //     &vec[i..i + l].iter().collect::<String>()
+                    // );
+                    vec.splice(i..i + l, std::iter::once(' '));
+                } else {
+                    i += 1;
+                }
             }
-            (None, _) => break,
+
+            self.char_contents.push(vec.into_boxed_slice());
+
+            Ok(self.char_contents.last().unwrap())
         }
     }
 
-    let pp_tokens = pp_tokenize(&vec);
+    pub fn lex(self, path: impl AsRef<Path>) -> Result<()> {
+        let content = self.open(path)?;
 
-    println!("{:?}", pp_tokens);
+        let tokens = self.preprocess(content)?;
+
+        println!("{:?}", tokens);
+
+        todo!();
+    }
+
+    fn preprocess<'a>(&'a self, content: &'a [char]) -> Result<Vec<PPToken<'a>>> {
+        let mut tokens = pp_tokenize(&content);
+
+        loop {
+            let needle = [
+                PPToken { text: &['#'], kind: PPKind::Punctuator },
+                PPToken {
+                    text: &['i', 'n', 'c', 'l', 'u', 'd', 'e'],
+                    kind: PPKind::Identifier,
+                },
+            ];
+            if let Some(pos) = tokens.windows(needle.len()).position(|w| w == needle) {
+                let path = tokens[pos + 2].text;
+                let path = &path[1..path.len() - 1];
+                let path = path.iter().collect::<String>();
+                let content = self.open(path)?;
+                let more_tokens = self.preprocess(content)?;
+                tokens.splice(pos..pos + 3, more_tokens.into_iter());
+            } else {
+                break;
+            };
+        }
+
+        Ok(tokens)
+    }
 }
 
 pub fn pp_tokenize(s: &[char]) -> Vec<PPToken<'_>> {
     let mut i = 0;
     let mut options: Vec<(usize, PPKind)> = Vec::new();
-    let mut result = Vec::new();
+    let mut result: Vec<PPToken> = Vec::new();
 
     while i < s.len() {
-        let mut slice = &s[i..];
-        while let Some(l) = dfa_comment(slice).ok() {
-            i += l;
-            slice = &s[i..];
-        }
+        let slice = &s[i..];
 
         // TODO: need more line state here
-        if let Some(l) = dfa_header_name(slice).ok() {
-            if let Some(&['i', 'n', 'c', 'l', 'u', 'd', 'e'] | &['e', 'm', 'b', 'e', 'd']) =
-                result.last().map(|x: &PPToken| x.text)
-            {
+        if let [.., PPToken { text: ['#'], kind: PPKind::Punctuator }, PPToken {
+            text: ['i', 'n', 'c', 'l', 'u', 'd', 'e'] | ['e', 'm', 'b', 'e', 'd'],
+            kind: PPKind::Identifier,
+        }] = result.as_slice()
+        {
+            if let Some(l) = dfa_header_name(slice).ok() {
                 options.push((l, PPKind::HeaderName));
             }
         }
@@ -230,7 +313,7 @@ pub fn pp_tokenize(s: &[char]) -> Vec<PPToken<'_>> {
             let text = &slice[..len];
             i += len;
             result.push(PPToken { text, kind });
-            println!("{:?} {:?}", result.last().unwrap(), kind);
+            // println!("{:?} {:?}", result.last().unwrap(), kind);
         } else {
             i += 1;
         }
@@ -704,9 +787,44 @@ mod tests {
             assert_eq!(
                 expected,
                 result.as_ref().map(|x| x.as_str()),
-                "f({input:?}) -> {result:?} != f({input:?}) -> {expected:?}",
+                "f({input:?}) -> {result:?} != {expected:?}",
             )
         }
+    }
+
+    #[test]
+    fn header_precedence() {
+        const S: &str = r#"#include "1/a.c"
+#include <2/a.h>
+include <2/a.h>
+include "2/a.h""#;
+
+        let s = S.chars().collect::<Vec<char>>();
+        let result = pp_tokenize(&s);
+
+        let expected = vec![
+            PPToken { text: &s[0..1], kind: PPKind::Punctuator },
+            PPToken { text: &s[1..8], kind: PPKind::Identifier },
+            PPToken { text: &s[9..16], kind: PPKind::HeaderName },
+            PPToken { text: &s[17..18], kind: PPKind::Punctuator },
+            PPToken { text: &s[18..25], kind: PPKind::Identifier },
+            PPToken { text: &s[26..33], kind: PPKind::HeaderName },
+            PPToken { text: &s[34..41], kind: PPKind::Identifier },
+            PPToken { text: &s[42..43], kind: PPKind::Punctuator },
+            PPToken { text: &s[43..44], kind: PPKind::PPNumber },
+            PPToken { text: &s[44..45], kind: PPKind::Punctuator },
+            PPToken { text: &s[45..46], kind: PPKind::Identifier },
+            PPToken { text: &s[46..47], kind: PPKind::Punctuator },
+            PPToken { text: &s[47..48], kind: PPKind::Identifier },
+            PPToken { text: &s[48..49], kind: PPKind::Punctuator },
+            PPToken { text: &s[50..57], kind: PPKind::Identifier },
+            PPToken {
+                text: &s[58..65],
+                kind: PPKind::StringLiteral,
+            },
+        ];
+
+        assert_eq!(result, expected, "{result:?} != {expected:?}");
     }
 
     #[test]
