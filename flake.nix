@@ -31,12 +31,18 @@
             overlays = [ rust-overlay.overlays.default ];
           };
           # rust = pkgs.rust-bin.stable.latest.default.override {
-          #   extensions = [ "rust-src" ];
+          #   extensions = [
+          #     "rust-src"
+          #     "rust-analyzer"
+          #   ];
           # };
           rust = pkgs.rust-bin.selectLatestNightlyWith (
             toolchain:
             toolchain.default.override {
-              extensions = [ "rust-src" ];
+              extensions = [
+                "rust-src"
+                "rust-analyzer"
+              ];
             }
           );
           libPath =
