@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::*;
 
 #[derive(Debug)]
-enum TokenOp<'a> {
+enum TokenOp {
     Transpose {
         arg_no: usize,
         offset: usize,
@@ -11,7 +11,7 @@ enum TokenOp<'a> {
     VaOpt {
         // represents the minimum number of args for this to be applied
         arg_no: usize,
-        tokens: Vec<PPToken<'a>>,
+        tokens: Vec<PPToken>,
         offset: usize,
     },
     VaArgs {
@@ -21,9 +21,9 @@ enum TokenOp<'a> {
     },
 }
 
-impl<'a> TokenOp<'a> {
+impl TokenOp {
     /// `&vec[offset..]` should *include* the identifier token (ie define macro key)
-    fn apply(&self, args: &[Vec<PPToken<'a>>], expr: &mut Vec<PPToken<'a>>) -> Result<()> {
+    fn apply(&self, args: &[Vec<PPToken>], expr: &mut Vec<PPToken>) -> Result<()> {
         match self {
             Self::Transpose { arg_no, offset } => {
                 expr.splice(
@@ -50,29 +50,31 @@ impl<'a> TokenOp<'a> {
 }
 
 #[derive(Debug)]
-pub struct DefineFn<'a> {
-    procedures: Option<Vec<TokenOp<'a>>>,
-    expr: Vec<PPToken<'a>>,
+pub struct DefineFn {
+    procedures: Option<Vec<TokenOp>>,
+    expr: Vec<PPToken>,
 }
 
-impl<'a> DefineFn<'a> {
+impl DefineFn {
     /// accepts the wildcard tokens as shown here, *not* the proceeding 3 constant tokens:
     /// `{#}{define}{IDENT}{?}*`
     ///
     /// `DefineFn` has zero knowledge of which identifier it belongs to, this is
     /// assumed to be handled by some higher level data structure
-    pub fn new(line: &[PPToken<'a>]) -> Result<DefineFn<'a>> {
+    pub fn new(line: &[PPToken]) -> Result<DefineFn> {
         if line.len() == 0 {
             return Ok(Self { procedures: None, expr: Vec::new() });
         }
 
-        if let PPToken { text: ['('], kind: PPKind::Punct, ws: false, .. } = line[0] {
+        if let PPToken { text, kind: PPKind::Punct, ws: false, .. } = &line[0]
+            && text.as_str() == "("
+        {
             let (used, args) = extract_args(line)?;
             // NOTE: identifier-list can only have identifiers separated by ',' -- 6.10.1
             if args.iter().find(|x| x.len() != 1).is_some() {
                 return Err(anyhow!("Something wrong with these args: {:?}", args));
             };
-            let args: Vec<&[char]> = args.iter().map(|x| x[0].text).collect();
+            let args: Vec<_> = args.iter().map(|x| x[0].text.as_str()).collect();
             let arg_no = args.len() - 1;
 
             let mut expr = line[used + 1..].to_vec();
@@ -85,13 +87,13 @@ impl<'a> DefineFn<'a> {
                 if let Some(token) = expr.get(offset) {
                     // TODO: this needs whitespace updating on sliced tokens
                     match token {
-                        PPToken { text: VA_OPT, kind: PPKind::Ident, .. } => {
+                        PPToken { text, kind: PPKind::Ident, .. } if text.as_str() == VA_OPT => {
                             if let Some(end) = match_paren(&expr[offset + 1..]) {
                                 // should be only tokens between the parens
                                 let tokens = expr[offset + 2..offset + end + 1].to_vec();
                                 // println!("VA_OPT tokens: {tokens:?} {offset} {end} {expr:?}");
                                 if let Some(split_pos) =
-                                    tokens.iter().position(|x| x.text == VA_ARGS)
+                                    tokens.iter().position(|x| x.text.as_str() == VA_ARGS)
                                 {
                                     if let Some(slice) = tokens.get(..split_pos) {
                                         procedures.push(TokenOp::VaOpt {
@@ -115,7 +117,7 @@ impl<'a> DefineFn<'a> {
                                 expr.drain(offset..offset + end + 2);
                             };
                         }
-                        PPToken { text: VA_ARGS, kind: PPKind::Ident, .. } => {
+                        PPToken { text, kind: PPKind::Ident, .. } if text.as_str() == VA_ARGS => {
                             procedures.push(TokenOp::VaArgs { arg_no, offset });
                             expr.remove(offset);
                         }
@@ -145,7 +147,7 @@ impl<'a> DefineFn<'a> {
     /// accepts tokens starting with {IDENT} (assumed to be associted with this
     /// macro definition, unchecked), because then `Self::apply` can handle all
     /// token replacements
-    pub fn apply(&self, vec: &mut Vec<PPToken<'a>>, offset: usize) -> Result<()> {
+    pub fn apply(&self, vec: &mut Vec<PPToken>, offset: usize) -> Result<()> {
         if let Some(procedures) = &self.procedures {
             let slice = vec.get(offset + 1..).ok_or(anyhow!("None"))?;
             let (used, args) = extract_args(slice)?;
@@ -166,16 +168,16 @@ impl<'a> DefineFn<'a> {
 }
 
 /// first token in input should be left paren
-fn match_paren<'a>(tokens: &[PPToken<'a>]) -> Option<usize> {
+fn match_paren<'a>(tokens: &[PPToken]) -> Option<usize> {
     let mut depth = 0;
     let mut result = None;
 
     for (i, token) in tokens.iter().enumerate() {
         match token {
-            PPToken { text: ['('], kind: PPKind::Punct, .. } => {
+            PPToken { text, kind: PPKind::Punct, .. } if text == LPAREN => {
                 depth += 1;
             }
-            PPToken { text: [')'], kind: PPKind::Punct, .. } => {
+            PPToken { text, kind: PPKind::Punct, .. } if text == RPAREN => {
                 depth -= 1;
             }
             _ => {}
@@ -189,7 +191,7 @@ fn match_paren<'a>(tokens: &[PPToken<'a>]) -> Option<usize> {
     result
 }
 
-fn extract_args<'a>(slice: &[PPToken<'a>]) -> Result<(usize, Vec<Vec<PPToken<'a>>>)> {
+fn extract_args<'a>(slice: &[PPToken]) -> Result<(usize, Vec<Vec<PPToken>>)> {
     let mut depth = 0;
     let mut args = Vec::new();
     let mut start = 1;
@@ -199,16 +201,16 @@ fn extract_args<'a>(slice: &[PPToken<'a>]) -> Result<(usize, Vec<Vec<PPToken<'a>
     for (i, token) in slice.iter().enumerate() {
         total = i;
         match token {
-            PPToken { text: ['('], kind: PPKind::Punct, .. } => {
+            PPToken { text, kind: PPKind::Punct, .. } if text == LPAREN => {
                 depth += 1;
             }
-            PPToken { text: [')'], kind: PPKind::Punct, .. } => {
+            PPToken { text, kind: PPKind::Punct, .. } if text == RPAREN => {
                 depth -= 1;
                 if depth > 0 {
                     end = i;
                 }
             }
-            PPToken { text: [','], kind: PPKind::Punct, .. } if depth == 1 => {
+            PPToken { text, kind: PPKind::Punct, .. } if text.as_str() == COMMA && depth == 1 => {
                 args.push((start, end));
                 start = i + 1;
                 end = start;
@@ -235,65 +237,130 @@ fn extract_args<'a>(slice: &[PPToken<'a>]) -> Result<(usize, Vec<Vec<PPToken<'a>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::tests::*, *};
 
-    fn def_test_pair(d: &str, x: &str) -> String {
-        let chars = d.chars().collect::<Vec<_>>();
-        let mut line = pp_tokenize(&chars);
+    fn def_test_pair(d: &str, x: &str) -> Vec<PPToken> {
+        let mut line = tokenize(d);
         line[0].ws = false;
         line[0].nl = false;
         let def = DefineFn::new(&line).unwrap();
-        println!("{:?}", &def);
 
-        let chars = x.chars().collect::<Vec<_>>();
-        let mut vec = pp_tokenize(&chars);
+        let mut vec = tokenize(x);
         def.apply(&mut vec, 0).unwrap();
 
-        format!("{vec:?}")
+        vec
     }
 
     #[test]
     fn define() {
-        assert_eq!(&def_test_pair("42", "A"), "[{42}]");
-        assert_eq!(&def_test_pair("2 + 2", "A"), "[{2}, {+}, {2}]");
-        assert_eq!(&def_test_pair("(A, B) B / A", "X(1, 2)"), "[{2}, {/}, {1}]");
+        // object-like: replace
         assert_eq!(
-            &def_test_pair("(A, B) B / A / B", "X(1, 2)"),
-            "[{2}, {/}, {1}, {/}, {2}]"
+            def_test_pair("42", "A"),
+            vec![tok("42", PPKind::PPNumber, false, false)]
         );
         assert_eq!(
-            &def_test_pair("(A, B) B / A", "X(1, 2 + 2)"),
-            "[{2}, {+}, {2}, {/}, {1}]"
+            def_test_pair("2 + 2", "A"),
+            vec![
+                tok("2", PPKind::PPNumber, false, false),
+                tok("+", PPKind::Punct, false, true),
+                tok("2", PPKind::PPNumber, false, true),
+            ]
+        );
+
+        // function-like: argument substitution
+        assert_eq!(
+            def_test_pair("(A, B) B / A", "X(1, 2)"),
+            vec![
+                tok("2", PPKind::PPNumber, false, true),
+                tok("/", PPKind::Punct, false, true),
+                tok("1", PPKind::PPNumber, false, false),
+            ]
         );
         assert_eq!(
-            &def_test_pair("(A, B) B / A", "X(1 * 1, 2 + 2)"),
-            "[{2}, {+}, {2}, {/}, {1}, {*}, {1}]"
+            def_test_pair("(A, B) B / A / B", "X(1, 2)"),
+            vec![
+                tok("2", PPKind::PPNumber, false, true),
+                tok("/", PPKind::Punct, false, true),
+                tok("1", PPKind::PPNumber, false, false),
+                tok("/", PPKind::Punct, false, true),
+                tok("2", PPKind::PPNumber, false, true),
+            ]
         );
         assert_eq!(
-            &def_test_pair("(...) f(0 __VA_OPT__(,) __VA_ARGS__)", "X(1)"),
-            "[{f}, {(}, {0}, {,}, {1}, {)}]"
+            def_test_pair("(A, B) B / A", "X(1, 2 + 2)"),
+            vec![
+                tok("2", PPKind::PPNumber, false, true),
+                tok("+", PPKind::Punct, false, true),
+                tok("2", PPKind::PPNumber, false, true),
+                tok("/", PPKind::Punct, false, true),
+                tok("1", PPKind::PPNumber, false, false),
+            ]
         );
         assert_eq!(
-            &def_test_pair(
+            def_test_pair("(A, B) B / A", "X(1 * 1, 2 + 2)"),
+            vec![
+                tok("2", PPKind::PPNumber, false, true),
+                tok("+", PPKind::Punct, false, true),
+                tok("2", PPKind::PPNumber, false, true),
+                tok("/", PPKind::Punct, false, true),
+                tok("1", PPKind::PPNumber, false, false),
+                tok("*", PPKind::Punct, false, true),
+                tok("1", PPKind::PPNumber, false, true),
+            ]
+        );
+
+        // variadic: __VA_OPT__ / __VA_ARGS__
+        assert_eq!(
+            def_test_pair("(...) f(0 __VA_OPT__(,) __VA_ARGS__)", "X(1)"),
+            vec![
+                tok("f", PPKind::Ident, false, true),
+                tok("(", PPKind::Punct, false, false),
+                tok("0", PPKind::PPNumber, false, false),
+                tok(",", PPKind::Punct, false, false),
+                tok("1", PPKind::PPNumber, false, false),
+                tok(")", PPKind::Punct, false, false),
+            ]
+        );
+        assert_eq!(
+            def_test_pair(
                 "(sname, ...) S sname __VA_OPT__(= { __VA_ARGS__ })",
                 "X(xxx, 123)"
             ),
-            "[{S}, {xxx}, {=}, {{}, {123}, {}}]"
+            vec![
+                tok("S", PPKind::Ident, false, true),
+                tok("xxx", PPKind::Ident, false, false),
+                tok("=", PPKind::Punct, false, false),
+                tok("{", PPKind::Punct, false, true),
+                tok("123", PPKind::PPNumber, false, true),
+                tok("}", PPKind::Punct, false, true),
+            ]
         );
     }
 
     #[test]
     fn arg_extraction() {
         const S: &str = r#"(a, 1 + 2, b, f(c), xXx)"#;
-        let s = S.chars().collect::<Vec<char>>();
-        let tokens = pp_tokenize(&s);
+        let tokens = tokenize(S);
         let (_, args) = extract_args(&tokens).unwrap();
 
-        let result = format!("{args:?}");
-
         assert_eq!(
-            result,
-            "[[{a}], [{1}, {+}, {2}], [{b}], [{f}, {(}, {c}, {)}], [{xXx}]]".to_string()
+            args,
+            vec![
+                vec![tok("a", PPKind::Ident, false, false)],
+                vec![
+                    tok("1", PPKind::PPNumber, false, true),
+                    tok("+", PPKind::Punct, false, true),
+                    tok("2", PPKind::PPNumber, false, true),
+                ],
+                vec![tok("b", PPKind::Ident, false, true)],
+                vec![
+                    tok("f", PPKind::Ident, false, true),
+                    tok("(", PPKind::Punct, false, false),
+                    tok("c", PPKind::Ident, false, false),
+                    tok(")", PPKind::Punct, false, false),
+                ],
+                vec![tok("xXx", PPKind::Ident, false, true)],
+            ]
         );
     }
 }

@@ -1,8 +1,10 @@
+use std::borrow::Borrow;
+
 use anyhow::Result;
 
 use super::*;
 
-pub fn dfa_header_name(s: &[char]) -> Result<usize, String> {
+pub fn dfa_header_name<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -19,7 +21,7 @@ pub fn dfa_header_name(s: &[char]) -> Result<usize, String> {
     const INV_Q: &[char] = &['\n', '"'];
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, '<') => St::HCont,
             (St::HCont, x) if !INV_H.contains(x) => St::HCont,
             (St::HCont, '>') => St::HTerm,
@@ -39,7 +41,7 @@ pub fn dfa_header_name(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_pp_number(s: &[char]) -> Result<usize, String> {
+pub fn dfa_pp_number<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -56,7 +58,7 @@ pub fn dfa_pp_number(s: &[char]) -> Result<usize, String> {
     const SIGNS: &[char] = &['-', '+'];
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, x) if DIGIT.contains(x) => St::Cont,
             (St::Ent, '.') => St::Period,
             (St::Period, x) if DIGIT.contains(x) => St::Cont,
@@ -79,7 +81,7 @@ pub fn dfa_pp_number(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_character_constant(s: &[char]) -> Result<usize, String> {
+pub fn dfa_character_constant<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -111,7 +113,7 @@ pub fn dfa_character_constant(s: &[char]) -> Result<usize, String> {
     let mut last = None;
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, 'u') => St::PreU,
             (St::PreU, '8') => St::Prefix,
             (St::Ent, 'U' | 'L') => St::Prefix,
@@ -157,7 +159,7 @@ pub fn dfa_character_constant(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_ucn(s: &[char]) -> Result<usize, String> {
+pub fn dfa_ucn<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -181,7 +183,7 @@ pub fn dfa_ucn(s: &[char]) -> Result<usize, String> {
     let mut last = None;
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, &c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, '\\') => St::Esc,
             (St::Esc, 'u') => St::UCNLower0,
             (St::UCNLower0, x) if HEX.contains(x) => St::UCNLower1,
@@ -210,8 +212,8 @@ pub fn dfa_ucn(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_other(s: &[char]) -> Result<usize, String> {
-    match s.get(0) {
+pub fn dfa_other<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
+    match s.get(0).map(|x| x.borrow()) {
         // vertical-tab and form-feed
         Some(' ' | '\t' | '\n' | '\x0B' | '\x0C') => Err("Invalid".to_string()),
         Some(_) => Ok(1),
@@ -221,7 +223,7 @@ pub fn dfa_other(s: &[char]) -> Result<usize, String> {
 
 // tokens: 7..=8
 
-pub fn dfa_identifier(s: &[char]) -> Result<usize, String> {
+pub fn dfa_identifier<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -232,7 +234,7 @@ pub fn dfa_identifier(s: &[char]) -> Result<usize, String> {
     let mut last = None;
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, x) if NON_DIGIT.contains(x) => St::Cont,
             (St::Cont, x) if DIGIT_AND_NON_DIGIT.contains(x) => St::Cont,
             _ => break,
@@ -248,7 +250,7 @@ pub fn dfa_identifier(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_string_literal(s: &[char]) -> Result<usize, String> {
+pub fn dfa_string_literal<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -279,7 +281,7 @@ pub fn dfa_string_literal(s: &[char]) -> Result<usize, String> {
     let mut last = None;
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, 'u') => St::PreU,
             (St::PreU, '8') => St::Prefix,
             (St::Ent, 'U' | 'L') => St::Prefix,
@@ -323,7 +325,7 @@ pub fn dfa_string_literal(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_punctuator(s: &[char]) -> Result<usize, String> {
+pub fn dfa_punctuator<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -354,7 +356,7 @@ pub fn dfa_punctuator(s: &[char]) -> Result<usize, String> {
     let mut last = None;
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, '[' | ']' | '(' | ')' | '{' | '}' | ',' | ';' | '?' | '~') => St::Term,
             (St::Ent, '+') => St::Plus,
             (St::Plus, '+' | '=') => St::Term,
@@ -407,7 +409,7 @@ pub fn dfa_punctuator(s: &[char]) -> Result<usize, String> {
     result.map(|x| x + 1).ok_or(format!("{st:?}:{last:?}"))
 }
 
-pub fn dfa_comment(s: &[char]) -> Result<usize, String> {
+pub fn dfa_comment<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
     #[derive(Debug)]
     enum St {
         Ent,
@@ -422,7 +424,7 @@ pub fn dfa_comment(s: &[char]) -> Result<usize, String> {
     let mut last = None;
 
     for (i, c) in s.iter().enumerate() {
-        st = match (&st, c) {
+        st = match (&st, c.borrow()) {
             (St::Ent, '/') => St::Slash,
             (St::Slash, '/') => St::LC,
             (St::LC, '\n') => break,
