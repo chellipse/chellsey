@@ -12,10 +12,8 @@ use constcat::concat_slices;
 use strum_macros::EnumString;
 
 mod dfa;
-use dfa::*;
-
+mod diagnostic;
 mod directive;
-use directive::*;
 
 // 6.4.1
 #[derive(Debug, EnumString)]
@@ -296,6 +294,13 @@ impl Lexer {
         let content = &self.char_contents[src];
         pp_tokenize(s, content, src)
     }
+
+    fn diagnostic(&self, span: &Span, msg: Option<String>) {
+        let path = &self.paths_opened[span.src];
+        let slice = &self.char_contents[span.src];
+
+        diagnostic::show(path, slice, span, msg)
+    }
 }
 
 fn filter_esc_nl_and_rep_comments<'a>(
@@ -317,7 +322,7 @@ fn filter_esc_nl_and_rep_comments<'a>(
     // partial phase 3, replacing comments with spaces
     let mut i = 0;
     while i < vec.len() {
-        if let Some(l) = dfa_comment(&vec[i..]).ok() {
+        if let Some(l) = dfa::dfa_comment(&vec[i..]).ok() {
             vec.splice(i..i + l, std::iter::once(SPACE));
         } else {
             i += 1;
@@ -368,36 +373,36 @@ fn pp_tokenize(s: &[&char], content: &[char], src: usize) -> Vec<PPToken> {
             && pt == "#"
             && (it == "include" || it == "embed")
         {
-            if let Some(l) = dfa_header_name(slice).ok() {
+            if let Some(l) = dfa::dfa_header_name(slice).ok() {
                 options.push((l, PPKind::Header));
             }
         }
 
-        if let Some(l) = dfa_identifier(slice).ok() {
+        if let Some(l) = dfa::dfa_identifier(slice).ok() {
             options.push((l, PPKind::Ident));
         }
 
-        if let Some(l) = dfa_pp_number(slice).ok() {
+        if let Some(l) = dfa::dfa_pp_number(slice).ok() {
             options.push((l, PPKind::PPNumber));
         }
 
-        if let Some(l) = dfa_character_constant(slice).ok() {
+        if let Some(l) = dfa::dfa_character_constant(slice).ok() {
             options.push((l, PPKind::CharConst));
         }
 
-        if let Some(l) = dfa_string_literal(slice).ok() {
+        if let Some(l) = dfa::dfa_string_literal(slice).ok() {
             options.push((l, PPKind::StrLit));
         }
 
-        if let Some(l) = dfa_punctuator(slice).ok() {
+        if let Some(l) = dfa::dfa_punctuator(slice).ok() {
             options.push((l, PPKind::Punct));
         }
 
-        if let Some(l) = dfa_ucn(slice).ok() {
+        if let Some(l) = dfa::dfa_ucn(slice).ok() {
             options.push((l, PPKind::UCN));
         }
 
-        if let Some(l) = dfa_other(slice).ok() {
+        if let Some(l) = dfa::dfa_other(slice).ok() {
             options.push((l, PPKind::Other));
         }
 
