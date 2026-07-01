@@ -11,3 +11,6 @@ elsa = { version = "1.11.2", features = ["indexmap"] }
 libc = "0.2.186"
 strum = "0.28.0"
 strum_macros = "0.28.0"
+
+[dev-dependencies]
+insta = "1.48.0"

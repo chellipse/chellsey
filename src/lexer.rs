@@ -544,4 +544,24 @@ mod tests {
 
         assert_eq!(result, expected, "{result:?} != {expected:?}");
     }
+
+    #[test]
+    fn pp_ints() {
+        const S: &str = r#"
+0 1 42 1000000
+1U 1u 1L 1l 1UL 1Lu 1LU 1uL 1LL 1ll 1ULL 1uLL 1LLu 1LLU 1llu 1llU
+0 07 0777 010U 0123L 0123456701234567ULL
+0x1 0X1 0xFF 0x1U 0x1u 0x1L 0x1UL 0x1LU 0x1LL 0x1ULL 0xDEADBEEFuLL 0Xabcdef
+0b1 0B1 0b1010 0b1010U 0b1010UL 0b1010ULL 0b101010101
+1wb 1uwb 1Uwb 1uWB 1WB 0x1Fwb 0b101uwb 123456789012345wb
+1'000 1'000'000 0x1'FFFF 0b1010'1010 1'000U 1'000'000ULL 0xFF'FF'FF'FFu
+1.0 1. .1 0.0 3.14159 1.0f 1.0F 1.0l 1.0L .5f 5.f 1e10 1E10 1e+10 1e-10 1.5e10 1.5e+10 1.5e-10 1.5e10f 1.5e-10L 1'000.5 1.000'001
+0x1p0 0x1P0 0x1.8p3 0x1.8p+3 0x1.8p-3 0x1p3f 0x1.8p-3L 0x1FFp10 0x.1p4 0x1.p4
+1.2.3 0x1.8 0x 0x1p 1e 1e+ 09 0128 1ULLULL 123abc 1.0.0f 0b 0b2 1wb2 1uwbu
+"#;
+
+        let result = tokenize(S);
+
+        insta::assert_debug_snapshot!(result);
+    }
 }

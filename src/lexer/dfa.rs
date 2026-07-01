@@ -62,16 +62,16 @@ pub fn dfa_pp_number<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
             (St::Ent, x) if DIGIT.contains(x) => St::Cont,
             (St::Ent, '.') => St::Period,
             (St::Period, x) if DIGIT.contains(x) => St::Cont,
-            (St::Cont, x) if IDENT_CONT.contains(x) => St::Cont,
-            (St::Cont, '\'') => St::Apostrophe,
-            (St::Apostrophe, x) if DIGIT_AND_NON_DIGIT.contains(x) => St::Cont,
             (St::Cont, x) if SIGN_LETTERS.contains(x) => St::SignLetter,
             (St::SignLetter, x) if SIGNS.contains(x) => St::Cont,
+            (St::Cont | St::SignLetter, x) if IDENT_CONT.contains(x) => St::Cont,
+            (St::Cont, '\'') => St::Apostrophe,
+            (St::Apostrophe, x) if DIGIT_AND_NON_DIGIT.contains(x) => St::Cont,
             (St::Cont, '.') => St::Cont,
             _ => break,
         };
 
-        if matches!(st, St::Cont) {
+        if matches!(st, St::Cont | St::SignLetter) {
             result = Some(i)
         }
 

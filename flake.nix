@@ -52,7 +52,10 @@
         in
         {
           default = pkgs.mkShell {
-            nativeBuildInputs = [ rust ];
+            nativeBuildInputs = [
+              rust
+              pkgs.cargo-insta
+            ];
             LD_LIBRARY_PATH = libPath;
           };
         }
