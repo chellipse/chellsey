@@ -12,6 +12,8 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     for path in cli.input.iter() {
-        lexer::Lexer::new().lex(path).unwrap();
+        let tokens = lexer::Lexer::new().lex(path).unwrap();
+
+        println!("Tokens: {:?}", &tokens);
     }
 }

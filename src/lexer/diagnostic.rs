@@ -1,6 +1,21 @@
-use std::{collections::VecDeque, fmt::Write as _, path::Path};
+use std::{
+    collections::VecDeque,
+    fmt::{Debug, Display, Write as _},
+    path::Path,
+};
 
-use super::Span;
+#[derive(Debug, Clone)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+    pub src: usize,
+}
+
+impl Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
 
 pub fn show(path: impl AsRef<Path>, slice: &[char], span: &Span, msg: Option<String>) {
     let mut line_chars = VecDeque::with_capacity(2usize.pow(9));

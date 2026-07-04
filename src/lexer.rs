@@ -1,6 +1,5 @@
 /// Does not currently handle [UAX #31](https://www.unicode.org/reports/tr31/)
 use std::{
-    fmt::Write,
     fs::File,
     io::Read,
     iter::Peekable,
@@ -9,97 +8,14 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use constcat::concat_slices;
-use strum_macros::EnumString;
 
 mod dfa;
 mod diagnostic;
 mod directive;
+mod token;
 
-// 6.4.1
-#[derive(Debug, EnumString)]
-#[allow(non_camel_case_types)]
-enum Keyword {
-    #[strum(serialize = "alignas", serialize = "_Alignas")]
-    alignas,
-    #[strum(serialize = "alignof", serialize = "_Alignof")]
-    alignof,
-    auto,
-    #[strum(serialize = "bool", serialize = "_Bool")]
-    bool,
-    #[strum(serialize = "break")]
-    _break,
-    case,
-    char,
-    #[strum(serialize = "const")]
-    _const,
-    constexpr,
-    #[strum(serialize = "continue")]
-    _continue,
-    default,
-    #[strum(serialize = "do")]
-    _do,
-    double,
-    #[strum(serialize = "else")]
-    _else,
-    #[strum(serialize = "enum")]
-    _enum,
-    #[strum(serialize = "extern")]
-    _extern,
-    #[strum(serialize = "false")]
-    _false,
-    float,
-    #[strum(serialize = "for")]
-    _for,
-    goto,
-    #[strum(serialize = "if")]
-    _if,
-    inline,
-    int,
-    long,
-    nullptr,
-    register,
-    restrict,
-    #[strum(serialize = "return")]
-    _return,
-    short,
-    signed,
-    sizeof,
-    #[strum(serialize = "static")]
-    _static,
-    #[strum(serialize = "static_assert", serialize = "_Static_assert")]
-    static_assert,
-    #[strum(serialize = "struct")]
-    _struct,
-    switch,
-    #[strum(serialize = "thread_local", serialize = "_Thread_local")]
-    thread_local,
-    #[strum(serialize = "true")]
-    _true,
-    typedef,
-    #[strum(serialize = "typeof")]
-    _typeof,
-    typeof_unqual,
-    union,
-    unsigned,
-    void,
-    volatile,
-    _while,
-    _Atomic,
-    _BitInt,
-    _Complex,
-    _Decimal128,
-    _Decimal32,
-    _Decimal64,
-    _Generic,
-    _Imaginary,
-    _Noreturn,
-}
-
-#[derive(Debug)]
-enum Token {
-    Kw(Keyword),
-    Identifier,
-}
+pub use diagnostic::*;
+pub use token::*;
 
 // 6.4.2
 
@@ -130,62 +46,12 @@ const HEX: &[char] = &[
     'D', 'E', 'F',
 ];
 
-const INCLUDE: &str = "include";
-const EMBED: &str = "embed";
-const DEFINE: &str = "define";
 const VA_ARGS: &str = "__VA_ARGS__";
 const VA_OPT: &str = "__VA_OPT__";
-const ELLIPSIS: &str = "...";
 const LPAREN: &str = "(";
 const RPAREN: &str = ")";
 const COMMA: &str = ",";
 const SPACE: &char = &' ';
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Span {
-    start: usize,
-    end: usize,
-    src: usize,
-}
-
-// preprocessing-tokens: 3..=6
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum PPKind {
-    Header,
-    Ident,
-    PPNumber,
-    CharConst,
-    StrLit,
-    Punct,
-    UCN,
-    Other,
-}
-
-/// `PartialEq` impl *ignores* self.span- for testing
-#[derive(Clone)]
-pub struct PPToken {
-    text: String,
-    kind: PPKind,
-    nl: bool,
-    ws: bool,
-    span: Span,
-}
-
-impl std::fmt::Debug for PPToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{{}:{:?}}}", self.text, self.kind)
-    }
-}
-
-impl PartialEq for PPToken {
-    fn eq(&self, other: &Self) -> bool {
-        self.text == other.text
-            && self.kind == other.kind
-            && self.nl == other.nl
-            && self.ws == other.ws
-    }
-}
 
 #[derive(Default)]
 pub struct Lexer {
@@ -227,15 +93,30 @@ impl Lexer {
         Ok(None)
     }
 
-    pub fn lex(self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn lex(self, path: impl AsRef<Path>) -> Result<Vec<Token>> {
         // can't be None cause that's just if we've opened it before...
         let content = self.open(path)?.unwrap();
 
         let tokens = self.preprocess(&content)?;
+        println!("PPTokens: {:?}", &tokens);
 
-        println!("{:?}", tokens);
+        // Phase 5 & 6 ignored
 
-        todo!("Phase 5");
+        let mut result = Vec::with_capacity(tokens.len());
+
+        for token in tokens {
+            match token.promote() {
+                Ok(t) => result.push(t),
+                Err(e) => {
+                    let span = e.downcast_ref::<Span>().unwrap();
+                    self.diagnostic(span, Some(format!("{e:?}")));
+
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     fn preprocess(&self, content: &[&char]) -> Result<Vec<PPToken>> {
@@ -371,7 +252,7 @@ fn pp_tokenize(s: &[&char], content: &[char], src: usize) -> Vec<PPToken> {
             PPToken { text: it, kind: PPKind::Ident, .. },
         ] = result.as_slice()
             && pt == "#"
-            && (it == "include" || it == "embed")
+            && matches!(it.as_str(), "include" | "embed")
         {
             if let Some(l) = dfa::dfa_header_name(slice).ok() {
                 options.push((l, PPKind::Header));
