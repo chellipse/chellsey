@@ -4,7 +4,7 @@ use strum_macros::EnumString;
 
 use super::Span;
 
-#[derive(Debug, Clone, EnumString)]
+#[derive(Debug, Clone, PartialEq, EnumString)]
 #[allow(non_camel_case_types)]
 pub enum Kw {
     #[strum(serialize = "alignas", serialize = "_Alignas")]
@@ -75,29 +75,29 @@ pub enum Kw {
     _Atomic,
     _BitInt,
     _Complex,
-    _Decimal128,
     _Decimal32,
     _Decimal64,
+    _Decimal128,
     _Generic,
     _Imaginary,
     _Noreturn,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IntSuf {
     Blank,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FloatSuf {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CharEnc {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StrEnc {}
 
-#[derive(Debug, Clone, EnumString)]
+#[derive(Debug, Clone, PartialEq, EnumString)]
 pub enum Punct {
     #[strum(serialize = "[", serialize = "<:")]
     LBracket,
@@ -199,7 +199,7 @@ pub enum Punct {
     HashHash,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Kw(Kw),
     Ident { value: String },
