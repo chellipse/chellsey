@@ -3,10 +3,13 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use super::types::*;
-use crate::lexer::{Kw, Punct, Span, Token, TokenKind};
+use anyhow::anyhow;
 
-type Result<T> = std::result::Result<T, Span>;
+use super::types::*;
+use crate::diagnostic::Error;
+use crate::lexer::{Kw, Punct, Token, TokenKind};
+
+type Result<T> = std::result::Result<T, Error>;
 
 struct ScopeStack(Vec<HashSet<String>>);
 
@@ -57,7 +60,7 @@ impl Parser {
     fn peek(&self) -> Result<&Token> {
         self.tokens
             .get(self.cursor)
-            .ok_or_else(|| self.peek_or_last().span.clone())
+            .ok_or_else(|| self.error("unexpected end of input"))
     }
 
     /// Panics:
@@ -67,6 +70,15 @@ impl Parser {
             .get(self.cursor)
             .or_else(|| self.tokens.last())
             .unwrap()
+    }
+
+    /// A span-carrying diagnostic error anchored at the current token (or the
+    /// last one, at EOF). Handed to `main` via the `Result` chain.
+    fn error(&self, msg: &str) -> Error {
+        self.peek_or_last()
+            .span
+            .clone()
+            .into_error(anyhow!("{msg}"))
     }
 
     fn consume(&mut self, n: usize) {
@@ -80,7 +92,7 @@ impl Parser {
             self.consume(1);
             Ok(())
         } else {
-            Err(self.peek_or_last().span.clone())
+            Err(self.error(&format!("expected {kind:?}")))
         }
     }
 }
@@ -125,7 +137,7 @@ impl Parser {
         }
 
         if specs.is_empty() {
-            return Err(self.peek_or_last().span.clone());
+            return Err(self.error("expected a type specifier"));
         }
         Ok(specs)
     }
@@ -134,7 +146,7 @@ impl Parser {
         let tok = self.peek()?;
         let ident = match &tok.kind {
             TokenKind::Ident { value } => value.clone(),
-            _ => return Err(self.peek_or_last().span.clone()),
+            _ => return Err(self.error("expected an identifier")),
         };
         self.consume(1);
 
@@ -162,7 +174,7 @@ impl Parser {
             _ => None,
         };
 
-        result.ok_or_else(|| self.peek_or_last().span.clone())
+        result.ok_or_else(|| self.error("expected a statement"))
     }
 
     fn parse_comp_stmt(&mut self) -> Result<Stmt> {
@@ -185,7 +197,7 @@ impl Parser {
         };
 
         result
-            .ok_or_else(|| self.peek_or_last().span.clone())
+            .ok_or_else(|| self.error("expected an expression"))
             .inspect(|_| self.cursor += 1)
     }
 }

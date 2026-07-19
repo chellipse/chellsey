@@ -1,21 +1,16 @@
 /// Does not currently handle [UAX #31](https://www.unicode.org/reports/tr31/)
-use std::{
-    fs::File,
-    io::Read,
-    iter::Peekable,
-    path::{Path, PathBuf},
-};
+use std::{fs::File, io::Read, iter::Peekable, path::Path};
 
 use anyhow::{Result, anyhow};
 use constcat::concat_slices;
 
 mod dfa;
-mod diagnostic;
 mod directive;
 mod token;
 
-pub use diagnostic::*;
 pub use token::*;
+
+use crate::diagnostic::{SourceManager, Span};
 
 // 6.4.2
 
@@ -53,36 +48,26 @@ const RPAREN: &str = ")";
 const COMMA: &str = ",";
 const SPACE: &char = &' ';
 
-#[derive(Default)]
-pub struct Lexer {
-    char_contents: elsa::FrozenVec<Box<[char]>>,
-    paths_opened: elsa::index_set::FrozenIndexSet<PathBuf>,
+pub struct Lexer<'a> {
+    sm: &'a SourceManager,
 }
 
-impl Lexer {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    fn add_source(
-        &self,
-        content: Box<[char]>,
-        path: PathBuf,
-    ) -> Peekable<impl Iterator<Item = &char>> {
-        self.char_contents.push(content);
-        self.paths_opened.insert(path);
-        self.char_contents.last().unwrap().iter().peekable()
+impl<'a> Lexer<'a> {
+    pub fn new(sm: &'a SourceManager) -> Self {
+        Self { sm }
     }
 
     fn open(&self, path: impl AsRef<Path>) -> Result<Option<Vec<&char>>> {
         let path = path.as_ref().to_path_buf();
-        if self.paths_opened.get(&path).is_none() {
+        if !self.sm.is_opened(&path) {
             let mut f = File::open(&path)?;
             let mut buf = String::new();
             f.read_to_string(&mut buf)?;
 
             // phase 1
-            let iter = self.add_source(buf.chars().collect::<Vec<_>>().into_boxed_slice(), path);
+            let iter = self
+                .sm
+                .add_source(buf.chars().collect::<Vec<_>>().into_boxed_slice(), path);
 
             // phase 2 and partial phase 3, replacing comments with spaces
             let vec = filter_esc_nl_and_rep_comments(iter);
@@ -105,15 +90,9 @@ impl Lexer {
         let mut result = Vec::with_capacity(tokens.len());
 
         for token in tokens {
-            match token.promote() {
-                Ok(t) => result.push(t),
-                Err(e) => {
-                    let span = e.downcast_ref::<Span>().unwrap();
-                    self.diagnostic(span, Some(format!("{e:?}")));
-
-                    return Err(e);
-                }
-            }
+            // `promote` yields a span-carrying `diagnostic::Error`; `?` folds it
+            // into `anyhow`, and `main` resolves it against `SOURCES`.
+            result.push(token.promote()?);
         }
 
         Ok(result)
@@ -171,16 +150,8 @@ impl Lexer {
     }
 
     fn pp_tokenize(&self, s: &[&char]) -> Vec<PPToken> {
-        let src = self.char_contents.len() - 1;
-        let content = &self.char_contents[src];
+        let (src, content) = self.sm.latest();
         pp_tokenize(s, content, src)
-    }
-
-    fn diagnostic(&self, span: &Span, msg: Option<String>) {
-        let path = &self.paths_opened[span.src];
-        let slice = &self.char_contents[span.src];
-
-        diagnostic::show(path, slice, span, msg)
     }
 }
 

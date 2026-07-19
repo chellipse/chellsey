@@ -1,8 +1,8 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::anyhow;
 use std::{fmt, str::FromStr as _};
 use strum_macros::EnumString;
 
-use super::Span;
+use crate::diagnostic::{Error, Span};
 
 #[derive(Debug, Clone, PartialEq, EnumString)]
 #[allow(non_camel_case_types)]
@@ -262,27 +262,30 @@ impl PartialEq for PPToken {
 }
 
 impl PPToken {
-    pub fn promote(&self) -> Result<Token> {
+    pub fn promote(&self) -> Result<Token, Error> {
         let kind = match self.kind {
             PPKind::Header => unreachable!(),
             PPKind::Ident => match Kw::from_str(&self.text) {
-                Ok(kw) => Ok(TokenKind::Kw(kw)),
-                Err(_) => Ok(TokenKind::Ident { value: self.text.clone() }),
+                Ok(kw) => TokenKind::Kw(kw),
+                Err(_) => TokenKind::Ident { value: self.text.clone() },
             },
             PPKind::PPNumber if let Ok(value) = u64::from_str(&self.text) => {
-                Ok(TokenKind::IntConst { value, suf: IntSuf::Blank })
+                TokenKind::IntConst { value, suf: IntSuf::Blank }
             }
             // PPKind::CharConst => {}
             // PPKind::StrLit => {}
-            PPKind::Punct => Ok(TokenKind::Punct(
-                Punct::from_str(&self.text).expect("PPToken invariant bug'"),
-            )),
+            PPKind::Punct => {
+                TokenKind::Punct(Punct::from_str(&self.text).expect("PPToken invariant bug'"))
+            }
             // PPKind::UCN => {}
             // PPKind::Other => {}
-            _ => Err(anyhow!("Unhandled")).context(self.span.clone()),
+            _ => {
+                return Err(self
+                    .span
+                    .clone()
+                    .into_error(anyhow!("unhandled preprocessing token")));
+            }
         };
-
-        let kind = kind?;
 
         Ok(Token { kind, span: self.span.clone() })
     }
