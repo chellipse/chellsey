@@ -1,9 +1,12 @@
 use std::{
-    collections::VecDeque,
-    fmt::{self, Display, Write as _},
+    fmt::{self, Display},
     iter::Peekable,
     path::{Path, PathBuf},
 };
+
+use annotate_snippets::{AnnotationKind, Group, Renderer, Snippet};
+
+pub use annotate_snippets::Level;
 
 #[derive(Default)]
 pub struct SourceManager {
@@ -36,10 +39,13 @@ impl SourceManager {
     }
 
     pub fn report(&self, err: &Error) {
-        let span = &err.span;
+        self.display(&err.span, Some(format!("{:?}", err.inner)), Level::ERROR);
+    }
+
+    pub fn display(&self, span: &Span, msg: Option<String>, level: Level) {
         let path = &self.paths_opened[span.src];
         let content = &self.char_contents[span.src];
-        show(path, content, span, Some(format!("{:?}", err.inner)));
+        show(path, content, span, msg, level);
     }
 }
 
@@ -60,6 +66,17 @@ impl Span {
     pub fn into_error(self, e: impl Into<anyhow::Error>) -> Error {
         Error { span: self, inner: e.into() }
     }
+
+    /// The smallest span covering both `self` and `other`: min `start`, max
+    /// `end`. Assumes a shared `src` (a preprocessing-stage invariant), so
+    /// `self.src` is kept as-is.
+    pub fn union(&self, other: &Span) -> Span {
+        Span {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+            src: self.src,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -76,61 +93,37 @@ impl Display for Error {
 
 impl std::error::Error for Error {}
 
-fn show(path: impl AsRef<Path>, slice: &[char], span: &Span, msg: Option<String>) {
-    let mut line_chars = VecDeque::with_capacity(2usize.pow(9));
-    slice[span.start..=span.end]
-        .iter()
-        .for_each(|c| line_chars.push_back(c));
+fn show(path: impl AsRef<Path>, slice: &[char], span: &Span, msg: Option<String>, level: Level) {
+    // `annotate-snippets` renders from a `&str` + byte ranges, but our source is
+    // `&[char]` and spans are char indices (with `end` inclusive). Rebuild the
+    // string and translate the char span into a byte range. Multi-line spans and
+    // the color highlighting of the covered tokens are handled by the renderer.
+    let source: String = slice.iter().collect();
+    let byte_start: usize = slice[..span.start].iter().map(|c| c.len_utf8()).sum();
+    let byte_end: usize = byte_start
+        + slice[span.start..=span.end]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum::<usize>();
 
-    let tlen = line_chars.len();
+    let path = path.as_ref().to_string_lossy();
 
-    for c in slice[..span.start].iter().rev() {
-        match *c {
-            '\n' => break,
-            _ => line_chars.push_front(c),
-        }
-    }
+    // The whole file is the source, so line 1 is line 1; `fold` elides the lines
+    // that fall outside the span, keeping the old "just the relevant line(s)" look.
+    let snippet = Snippet::source(source.as_str())
+        .line_start(1)
+        .path(path.as_ref())
+        .fold(true)
+        .annotation(
+            AnnotationKind::Primary
+                .span(byte_start..byte_end)
+                .highlight_source(true),
+        );
 
-    let col_no = line_chars.len() - tlen;
+    let group = match &msg {
+        Some(msg) => level.primary_title(msg.as_str()).element(snippet),
+        None => Group::with_level(level).element(snippet),
+    };
 
-    if span.end < slice.len() {
-        for c in slice[span.end + 1..].iter() {
-            match *c {
-                '\n' => break,
-                _ => line_chars.push_back(c),
-            }
-        }
-    }
-
-    let line_no: u64 = slice[..span.start]
-        .iter()
-        .filter(|c| **c == '\n')
-        .map(|_| 1)
-        .sum();
-
-    let line_no_str = format!("{line_no}");
-    let lpad = line_no_str.len();
-
-    let line_str = line_chars.into_iter().collect::<String>();
-
-    let mut hl_str = String::new();
-    hl_str.extend(std::iter::repeat(' ').take(col_no));
-    hl_str.extend(std::iter::repeat('^').take(tlen));
-
-    let mut buf = String::new();
-
-    if let Some(msg) = msg {
-        writeln!(buf, "{}", msg).unwrap();
-    }
-    writeln!(
-        buf,
-        "{:lpad$}--> {:?}:{line_no}:{col_no}",
-        "",
-        path.as_ref()
-    )
-    .unwrap();
-    writeln!(buf, "{line_no_str} | {line_str}",).unwrap();
-    writeln!(buf, "{:lpad$} | {hl_str}", "").unwrap();
-
-    eprintln!("{buf}");
+    eprintln!("{}", Renderer::styled().render(&[group]));
 }
