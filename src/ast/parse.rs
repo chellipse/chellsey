@@ -6,7 +6,7 @@ use std::{
 use anyhow::anyhow;
 
 use super::types::*;
-use crate::diagnostic::Error;
+use crate::diagnostic::{Error, Span};
 use crate::lexer::{Kw, Punct, Token, TokenKind};
 
 type Result<T> = std::result::Result<T, Error>;
@@ -47,12 +47,15 @@ impl Parser {
         Self { tokens, cursor: 0, scopes: ScopeStack::new() }
     }
 
+    /// Panics:
+    /// * if self.tokens.len() == 0
     pub fn parse(mut self) -> Result<TranslationUnit> {
         let mut decls = Vec::new();
         while self.peek().is_ok() {
             decls.push(self.parse_ext_decl()?);
         }
-        Ok(TranslationUnit { decls })
+        let span = self.tokens[0].span.union(&self.tokens.last().unwrap().span);
+        Ok(TranslationUnit { decls, span })
     }
 }
 
@@ -85,6 +88,12 @@ impl Parser {
         self.cursor += n;
     }
 
+    fn spanned(&self, lo: usize) -> Span {
+        self.tokens[lo]
+            .span
+            .union(&self.tokens[self.cursor - 1].span)
+    }
+
     fn consume_expect(&mut self, kind: TokenKind) -> Result<()> {
         if let Ok(tok) = self.peek()
             && tok.kind == kind
@@ -99,21 +108,25 @@ impl Parser {
 
 impl Parser {
     fn parse_ext_decl(&mut self) -> Result<ExtDecl> {
+        let lo = self.cursor;
+
         // shared prefix: both a function-definition and a declaration start here
         let type_spec = self.parse_decl_specifiers()?;
         let ident = self.parse_declarator()?;
 
         // the one token that decides the branch: '{' (a body) => FuncDef, else Decl
-        if let Ok(tok) = self.peek()
+        let kind = if let Ok(tok) = self.peek()
             && tok.kind == TokenKind::Punct(Punct::LBrace)
         {
             let body = self.parse_comp_stmt()?;
-            Ok(ExtDecl::FuncDef { type_spec, ident, body })
+            ExtDeclKind::FuncDef { type_spec, ident, body }
         } else {
             // minimal declaration: no initializers or multi-declarator lists yet
             self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
-            Ok(ExtDecl::Decl { type_spec, ident })
-        }
+            ExtDeclKind::Decl { type_spec, ident }
+        };
+
+        Ok(ExtDecl { kind, span: self.spanned(lo) })
     }
 
     fn parse_decl_specifiers(&mut self) -> Result<Vec<String>> {
@@ -162,22 +175,25 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
         let tok = self.peek()?;
-        let result = match &tok.kind {
+        let kind = match &tok.kind {
             TokenKind::Kw(Kw::_return) => {
                 self.consume(1);
                 let expr = self.parse_expr().ok();
                 self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
-                Some(Stmt::Return(expr))
+                StmtKind::Return(expr)
             }
-            TokenKind::Punct(Punct::LBrace) => Some(self.parse_comp_stmt()?),
-            _ => None,
+            // a nested block builds its own spanned `Stmt`
+            TokenKind::Punct(Punct::LBrace) => return self.parse_comp_stmt(),
+            _ => return Err(self.error("expected a statement")),
         };
 
-        result.ok_or_else(|| self.error("expected a statement"))
+        Ok(Stmt { kind, span: self.spanned(lo) })
     }
 
     fn parse_comp_stmt(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
         self.consume_expect(TokenKind::Punct(Punct::LBrace))?;
         let mut stmts = Vec::new();
         while let Ok(tok) = self.peek()
@@ -186,18 +202,18 @@ impl Parser {
             stmts.push(self.parse_stmt()?);
         }
         self.consume_expect(TokenKind::Punct(Punct::RBrace))?;
-        Ok(Stmt::Compound(stmts))
+        Ok(Stmt { kind: StmtKind::Compound(stmts), span: self.spanned(lo) })
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
+        let lo = self.cursor;
         let tok = self.peek()?;
-        let result = match &tok.kind {
-            TokenKind::IntConst { value, .. } => Some(Expr::IntLit(*value)),
-            _ => None,
+        let kind = match &tok.kind {
+            TokenKind::IntConst { value, .. } => ExprKind::IntLit(*value),
+            _ => return Err(self.error("expected an expression")),
         };
+        self.consume(1);
 
-        result
-            .ok_or_else(|| self.error("expected an expression"))
-            .inspect(|_| self.cursor += 1)
+        Ok(Expr { kind, span: self.spanned(lo) })
     }
 }
