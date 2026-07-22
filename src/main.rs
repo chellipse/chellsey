@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 pub mod ast;
+pub mod codegen;
 pub mod diagnostic;
+pub mod ir;
 pub mod lexer;
+pub mod sema;
 
 use diagnostic::SourceManager;
 
@@ -33,7 +36,21 @@ fn compile(sources: &SourceManager, path: &Path) -> anyhow::Result<()> {
     println!("Tokens: {:?}", &tokens);
 
     let ast = ast::Parser::new(tokens).parse()?;
-    println!("Result: {:?}", &ast);
+    println!("AST: {:?}", &ast);
+
+    let sr = sema::Sema::new().analyze(&ast);
+    println!("SEMA: {sr:?}");
+    sr?;
+
+    let ir = ir::lower(&ast);
+    println!("IR:\n{ir}");
+
+    println!("ASM:\n{}", codegen::assembly(&ir));
+
+    let obj = codegen::emit_object(&ir)?;
+    let out = path.with_extension("o");
+    std::fs::write(&out, obj)?;
+    println!("wrote {}", out.display());
 
     Ok(())
 }
