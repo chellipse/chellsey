@@ -71,6 +71,7 @@ pub enum Kw {
     unsigned,
     void,
     volatile,
+    #[strum(serialize = "while")]
     _while,
     _Atomic,
     _BitInt,
