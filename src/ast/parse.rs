@@ -205,7 +205,29 @@ impl Parser {
         Ok(Stmt { kind: StmtKind::Compound(stmts), span: self.spanned(lo) })
     }
 
+    /// Additive level: parse one primary, then fold `+` left-associatively.
+    /// Lookahead is via `peek` (not `consume`), so a non-operator such as `;`
+    /// is left in place for the caller — the previous version consumed it.
     fn parse_expr(&mut self) -> Result<Expr> {
+        let mut lhs = self.parse_primary()?;
+
+        while let Ok(tok) = self.peek()
+            && tok.kind == TokenKind::Punct(Punct::Plus)
+        {
+            self.consume(1); // commit to the operator now that we've seen it
+            let rhs = self.parse_primary()?;
+            let span = lhs.span.union(&rhs.span);
+            lhs = Expr { kind: ExprKind::Add(Box::new(lhs), Box::new(rhs)), span };
+        }
+
+        Ok(lhs)
+    }
+
+    /// A primary expression — the atoms operators combine. Integer literals for
+    /// now; parens/calls/identifiers slot in here later. When a higher-
+    /// precedence level (e.g. `*`) arrives, `parse_expr`'s operand becomes a
+    /// call to *that* level, and that level's operand is `parse_primary`.
+    fn parse_primary(&mut self) -> Result<Expr> {
         let lo = self.cursor;
         let tok = self.peek()?;
         let kind = match &tok.kind {
@@ -213,7 +235,6 @@ impl Parser {
             _ => return Err(self.error("expected an expression")),
         };
         self.consume(1);
-
         Ok(Expr { kind, span: self.spanned(lo) })
     }
 }

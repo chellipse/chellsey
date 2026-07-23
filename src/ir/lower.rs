@@ -26,6 +26,8 @@ struct FnBuilder {
     ret_ty: Type,
     blocks: Vec<BasicBlock>,
     current: usize,
+    /// Next SSA value number to hand out.
+    next_val: usize,
 }
 
 impl FnBuilder {
@@ -33,7 +35,7 @@ impl FnBuilder {
         // Entry block. Its terminator defaults to an implicit `ret void`, which
         // an explicit `return` overwrites (and which covers an empty body).
         let entry = BasicBlock { id: BlockId(0), insts: Vec::new(), term: Terminator::Ret(None) };
-        Self { name, ret_ty, blocks: vec![entry], current: 0 }
+        Self { name, ret_ty, blocks: vec![entry], current: 0, next_val: 0 }
     }
 
     fn stmt(&mut self, stmt: &Stmt) {
@@ -44,22 +46,36 @@ impl FnBuilder {
                 }
             }
             StmtKind::Return(expr) => {
-                let val = expr.as_ref().map(lower_expr);
+                let val = expr.as_ref().map(|e| self.expr(e));
                 self.blocks[self.current].term = Terminator::Ret(val);
+            }
+        }
+    }
+
+    /// Lower an expression, emitting whatever instructions it needs into the
+    /// current block, and returning the `Value` that holds its result. This is
+    /// the SSA construction: a leaf is a `Value` directly; a composite emits an
+    /// instruction and returns the fresh value it defines.
+    fn expr(&mut self, e: &Expr) -> Value {
+        match &e.kind {
+            // widening the u64 literal into the operand's i64 store is fine for
+            // the constants we currently accept.
+            ExprKind::IntLit(v) => Value::Const(*v as i64),
+            ExprKind::Add(lhs, rhs) => {
+                let lhs = self.expr(lhs);
+                let rhs = self.expr(rhs);
+                let dst = self.next_val;
+                self.next_val += 1;
+                self.blocks[self.current]
+                    .insts
+                    .push(Inst::Add { dst, lhs, rhs });
+                Value::Reg(dst)
             }
         }
     }
 
     fn finish(self) -> Function {
         Function { name: self.name, ret_ty: self.ret_ty, blocks: self.blocks }
-    }
-}
-
-fn lower_expr(expr: &Expr) -> Value {
-    match &expr.kind {
-        // widening the u64 literal into the operand's i64 store is fine for the
-        // constants we currently accept.
-        ExprKind::IntLit(v) => Value::Const(*v as i64),
     }
 }
 

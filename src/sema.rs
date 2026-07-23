@@ -84,12 +84,18 @@ impl Sema {
 fn expr_ty(expr: &Expr) -> Ty {
     match &expr.kind {
         ExprKind::IntLit(_) => Ty::Int,
+        ExprKind::Add(_, _) => Ty::Int,
     }
 }
 
 /// Map declaration specifiers to a return type. `None` means "not yet modelled".
 fn ty_of_spec(spec: &[String]) -> Option<Ty> {
-    match spec.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match spec
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["int"] => Some(Ty::Int),
         ["void"] => Some(Ty::Void),
         _ => None,

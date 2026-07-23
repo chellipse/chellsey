@@ -46,4 +46,5 @@ pub struct Expr {
 #[derive(Debug)]
 pub enum ExprKind {
     IntLit(u64),
+    Add(Box<Expr>, Box<Expr>),
 }
