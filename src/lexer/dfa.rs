@@ -118,7 +118,8 @@ pub fn dfa_character_constant<T: Borrow<char>>(s: &[T]) -> Result<usize, String>
             (St::PreU, '8') => St::Prefix,
             (St::Ent, 'U' | 'L') => St::Prefix,
             (St::Ent | St::PreU | St::Prefix, '\'') => St::Start,
-            (St::Cont | St::Start, '\\') => St::Esc,
+            // octal/hex escapes end at the next `\` too: '\x41\102'
+            (St::Cont | St::Start | St::Octal1 | St::Octal2 | St::Hex, '\\') => St::Esc,
             (St::Esc, x) if SIMPLE_ESCAPES.contains(x) => St::Cont,
             (St::Esc, x) if OCTAL.contains(x) => St::Octal1,
             (St::Octal1, x) if OCTAL.contains(x) => St::Octal2,
@@ -286,7 +287,8 @@ pub fn dfa_string_literal<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
             (St::PreU, '8') => St::Prefix,
             (St::Ent, 'U' | 'L') => St::Prefix,
             (St::Ent | St::PreU | St::Prefix, '"') => St::Cont,
-            (St::Cont, '\\') => St::Esc,
+            // octal/hex escapes end at the next `\` too: "\x41\102"
+            (St::Cont | St::Octal1 | St::Octal2 | St::Hex, '\\') => St::Esc,
             (St::Esc, x) if SIMPLE_ESCAPES.contains(x) => St::Cont,
             (St::Esc, x) if OCTAL.contains(x) => St::Octal1,
             (St::Octal1, x) if OCTAL.contains(x) => St::Octal2,
