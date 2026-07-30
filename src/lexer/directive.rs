@@ -1,6 +1,12 @@
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow};
 
 use super::*;
+
+/// The macro table, keyed by macro name. Threaded through preprocessing so
+/// definitions from an included file apply to its includer.
+pub type Macros = HashMap<String, DefineFn>;
 
 #[derive(Debug)]
 enum TokenOp {
@@ -37,10 +43,35 @@ impl TokenOp {
                 }
             }
             Self::VaArgs { arg_no, offset } => {
+                // 6.10.5.1: __VA_ARGS__ is the trailing arguments merged into
+                // one, *including* the separating commas — re-synthesized here
+                // since `extract_args` splits them away
                 if args.len() > *arg_no {
-                    for arg in args.get(*arg_no..).ok_or(anyhow!("None"))? {
-                        expr.splice(offset..offset, arg.iter().cloned());
+                    let mut joined: Vec<PPToken> = Vec::new();
+                    for (n, arg) in args
+                        .get(*arg_no..)
+                        .ok_or(anyhow!("None"))?
+                        .iter()
+                        .enumerate()
+                    {
+                        // the separator's span is borrowed from a neighbor; it
+                        // is never itself the subject of a diagnostic
+                        if n > 0
+                            && let Some(span) =
+                                arg.first().or(joined.last()).map(|t| t.span.clone())
+                        {
+                            joined.push(PPToken {
+                                text: COMMA.to_string(),
+                                kind: PPKind::Punct,
+                                nl: false,
+                                ws: false,
+                                span,
+                                hs: HideSet::default(),
+                            });
+                        }
+                        joined.extend(arg.iter().cloned());
                     }
+                    expr.splice(offset..offset, joined);
                 }
             }
         }
@@ -51,7 +82,11 @@ impl TokenOp {
 
 #[derive(Debug)]
 pub struct DefineFn {
-    procedures: Option<Vec<TokenOp>>,
+    /// distinguishes `#define F(..)` from `#define F ..` — a zero-parameter
+    /// function-like macro must still consume its `()` at the call site, so
+    /// this cannot be inferred from `procedures` being non-empty
+    function_like: bool,
+    procedures: Vec<TokenOp>,
     expr: Vec<PPToken>,
 }
 
@@ -63,19 +98,25 @@ impl DefineFn {
     /// assumed to be handled by some higher level data structure
     pub fn new(line: &[PPToken]) -> Result<DefineFn> {
         if line.len() == 0 {
-            return Ok(Self { procedures: None, expr: Vec::new() });
+            return Ok(Self { function_like: false, procedures: Vec::new(), expr: Vec::new() });
         }
 
         if let PPToken { text, kind: PPKind::Punct, ws: false, .. } = &line[0]
             && text.as_str() == "("
         {
-            let (used, args) = extract_args(line)?;
-            // NOTE: identifier-list can only have identifiers separated by ',' -- 6.10.1
-            if args.iter().find(|x| x.len() != 1).is_some() {
-                return Err(anyhow!("Something wrong with these args: {:?}", args));
+            let (used, params) = extract_args(line)?;
+            // `()` extracts as a single empty parameter: a zero-parameter macro
+            let params: Vec<&str> = if params.len() == 1 && params[0].is_empty() {
+                Vec::new()
+            } else if let Some(bad) = params.iter().find(|x| x.len() != 1) {
+                // NOTE: identifier-list can only have identifiers separated by ',' -- 6.10.1
+                return Err(anyhow!("Something wrong with these args: {:?}", bad));
+            } else {
+                params.iter().map(|x| x[0].text.as_str()).collect()
             };
-            let args: Vec<_> = args.iter().map(|x| x[0].text.as_str()).collect();
-            let arg_no = args.len() - 1;
+            // the index of the first variadic argument, when the list ends `...`
+            let arg_no = params.len().saturating_sub(1);
+            let args = params;
 
             let mut expr = line[used + 1..].to_vec();
 
@@ -136,35 +177,114 @@ impl DefineFn {
 
             procedures.reverse();
 
-            let procedures = Some(procedures).filter(|x| x.len() > 0);
-
-            Ok(Self { procedures, expr })
+            Ok(Self { function_like: true, procedures, expr })
         } else {
-            Ok(Self { procedures: None, expr: line.to_vec() })
+            Ok(Self {
+                function_like: false,
+                procedures: Vec::new(),
+                expr: line.to_vec(),
+            })
         }
+    }
+
+    pub fn is_function_like(&self) -> bool {
+        self.function_like
     }
 
     /// accepts tokens starting with {IDENT} (assumed to be associted with this
     /// macro definition, unchecked), because then `Self::apply` can handle all
     /// token replacements
-    pub fn apply(&self, vec: &mut Vec<PPToken>, offset: usize) -> Result<()> {
-        if let Some(procedures) = &self.procedures {
+    ///
+    /// `hs` is the hide set the expansion is painted with, computed by the
+    /// caller (which knows the macro's name): `HS(name) ∪ {name}` for
+    /// object-like, `(HS(name) ∩ HS(rparen)) ∪ {name}` for function-like.
+    pub fn apply(
+        &self,
+        vec: &mut Vec<PPToken>,
+        offset: usize,
+        hs: &HideSet,
+        macros: &Macros,
+    ) -> Result<()> {
+        let mut expr = self.expr.clone();
+
+        let consumed = if self.function_like {
             let slice = vec.get(offset + 1..).ok_or(anyhow!("None"))?;
-            let (used, args) = extract_args(slice)?;
+            let (used, mut args) = extract_args(slice)?;
 
-            let mut expr = self.expr.clone();
+            // argument prescan (6.10.5.1p11): each argument is fully
+            // macro-expanded *before* substitution; painting then happens on
+            // the substituted result. This ordering is what lets `f(f(1))`
+            // expand fully while `f(f)(1)` correctly leaves the inner `f`
+            // painted. (`#`/`##` will additionally need the unexpanded
+            // argument copies — TBD.)
+            for arg in &mut args {
+                expand(arg, macros)?;
+            }
 
-            for procedure in procedures {
+            for procedure in &self.procedures {
                 procedure.apply(&args, &mut expr)?;
             }
 
-            vec.splice(offset..offset + used + 2, expr);
+            used + 2 // the name, the arguments, and both parens
         } else {
-            vec.splice(offset..offset + 1, self.expr.clone());
+            1 // just the name
+        };
+
+        // hsadd: paint every produced token so a rescan cannot re-enter this
+        // expansion
+        for token in &mut expr {
+            token.hs = token.hs.union(hs);
         }
 
+        vec.splice(offset..offset + consumed, expr);
         Ok(())
     }
+}
+
+/// Rescan `tokens` until no expandable macro invocation remains. Terminates
+/// because every expansion paints its output: hide sets only grow.
+pub fn expand(tokens: &mut Vec<PPToken>, macros: &Macros) -> Result<()> {
+    let mut i = 0;
+    while i < tokens.len() {
+        if !try_expand_at(tokens, i, macros)? {
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Expand the macro invocation starting at `tokens[i]`, if there is one.
+/// Returns whether an expansion happened — the caller should rescan from `i`
+/// (not advance) when it did.
+pub fn try_expand_at(tokens: &mut Vec<PPToken>, i: usize, macros: &Macros) -> Result<bool> {
+    if tokens[i].kind != PPKind::Ident || tokens[i].hs.hides(&tokens[i].text) {
+        return Ok(false);
+    }
+    let Some(def) = macros.get(&tokens[i].text) else {
+        return Ok(false);
+    };
+
+    let hs = if def.is_function_like() {
+        // a function-like name is only an invocation when followed by `(`
+        // (else it stays a plain identifier), and only when the call is
+        // closed within the stream
+        match tokens.get(i + 1) {
+            Some(PPToken { text, kind: PPKind::Punct, .. }) if text == LPAREN => {}
+            _ => return Ok(false),
+        }
+        let Some(rparen) = match_paren(&tokens[i + 1..]) else {
+            return Ok(false);
+        };
+        tokens[i]
+            .hs
+            .intersect(&tokens[i + 1 + rparen].hs)
+            .with(&tokens[i].text)
+    } else {
+        tokens[i].hs.with(&tokens[i].text)
+    };
+
+    def.apply(tokens, i, &hs, macros)?;
+    Ok(true)
 }
 
 /// first token in input should be left paren
@@ -246,9 +366,80 @@ mod tests {
         let def = DefineFn::new(&line).unwrap();
 
         let mut vec = tokenize(x);
-        def.apply(&mut vec, 0).unwrap();
+        def.apply(
+            &mut vec,
+            0,
+            &HideSet::default().with("X"),
+            &Macros::default(),
+        )
+        .unwrap();
 
         vec
+    }
+
+    /// Build a macro table from `(name, body)` pairs. A body string starting
+    /// with an unspaced `(` is function-like, mirroring the real directive
+    /// line.
+    fn macros_of(defs: &[(&str, &str)]) -> Macros {
+        defs.iter()
+            .map(|(name, body)| {
+                let mut line = tokenize(body);
+                if let Some(first) = line.first_mut() {
+                    first.nl = false;
+                    first.ws = false;
+                }
+                (name.to_string(), DefineFn::new(&line).unwrap())
+            })
+            .collect()
+    }
+
+    fn expand_str(src: &str, macros: &Macros) -> String {
+        let mut tokens = tokenize(src);
+        expand(&mut tokens, macros).unwrap();
+        let texts: Vec<_> = tokens.iter().map(|t| t.text.as_str()).collect();
+        texts.join(" ")
+    }
+
+    #[test]
+    fn hide_set_self_recursion() {
+        let m = macros_of(&[("x", "x")]);
+        assert_eq!(expand_str("x", &m), "x");
+    }
+
+    #[test]
+    fn hide_set_mutual_recursion() {
+        // valid C — must terminate, and the survivor is the painted name
+        let m = macros_of(&[("a", "b"), ("b", "a")]);
+        assert_eq!(expand_str("a", &m), "a");
+        assert_eq!(expand_str("b", &m), "b");
+    }
+
+    #[test]
+    fn nested_self_call() {
+        // prescan: the inner f expands *before* the outer paints its output
+        let m = macros_of(&[("f", "(x) (x)")]);
+        assert_eq!(expand_str("f(f(1))", &m), "( ( 1 ) )");
+    }
+
+    #[test]
+    fn painted_argument() {
+        // f(f)(1): the argument `f` (no parens) survives prescan, then hsadd
+        // paints it {f} — the rescan must NOT expand `f (1)`. gcc agrees.
+        let m = macros_of(&[("f", "(x) x")]);
+        assert_eq!(expand_str("f(f)(1)", &m), "f ( 1 )");
+    }
+
+    #[test]
+    fn zero_param_function_like() {
+        // `F()` is an invocation and consumes its parens; bare `F` is not
+        let m = macros_of(&[("F", "() 42")]);
+        assert_eq!(expand_str("F() + F", &m), "42 + F");
+    }
+
+    #[test]
+    fn va_args_order_and_commas() {
+        let m = macros_of(&[("F", "(a, ...) f(a, __VA_ARGS__)")]);
+        assert_eq!(expand_str("F(1, 2, 3)", &m), "f ( 1 , 2 , 3 )");
     }
 
     #[test]

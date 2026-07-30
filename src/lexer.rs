@@ -82,7 +82,8 @@ impl<'a> Lexer<'a> {
         // can't be None cause that's just if we've opened it before...
         let content = self.open(path)?.unwrap();
 
-        let tokens = self.preprocess(&content)?;
+        let mut macros = directive::Macros::default();
+        let tokens = self.preprocess(&content, &mut macros)?;
         println!("PPTokens: {:?}", &tokens);
 
         // Phase 5 & 6 ignored
@@ -98,7 +99,16 @@ impl<'a> Lexer<'a> {
         Ok(result)
     }
 
-    fn preprocess(&self, content: &[&char]) -> Result<Vec<PPToken>> {
+    /// Translation phase 4: execute directives and expand macros, in one
+    /// left-to-right scan (so definitions apply only to uses after them, and
+    /// `#undef` takes effect mid-file). `macros` is threaded through
+    /// `#include` recursion so an included file's definitions reach its
+    /// includer.
+    fn preprocess(
+        &self,
+        content: &[&char],
+        macros: &mut directive::Macros,
+    ) -> Result<Vec<PPToken>> {
         let mut tokens = self.pp_tokenize(&content);
 
         let mut i = 0;
@@ -120,30 +130,50 @@ impl<'a> Lexer<'a> {
                         chars.next_back();
                         let path = chars.as_str();
                         if let Some(content) = self.open(path)? {
-                            let more_tokens = self.preprocess(&content)?;
+                            let more_tokens = self.preprocess(&content, macros)?;
                             tokens.splice(i..i + 3, more_tokens.into_iter());
-                        };
+                        } else {
+                            // already opened once: splice in nothing (a crude
+                            // implicit `#pragma once`), but still drop the
+                            // directive so the scan makes progress
+                            tokens.drain(i..i + 3);
+                        }
                     }
                     // TODO: make define w/o identifier error
                     [
                         PPToken { text, kind: PPKind::Ident, .. },
-                        PPToken { text: key, kind: PPKind::Ident, .. },
+                        PPToken { text: key, kind: PPKind::Ident, nl: false, .. },
                         ..,
                     ] if text.as_str() == "define" => {
-                        // TODO make \n#\n error
-                        let eol = tokens[i + 3..].iter().position(|x| x.nl).unwrap();
-                        let tokens = &tokens[i + 3..i + eol];
-
-                        todo!()
+                        // the body is everything after the name to end of line
+                        let body_at = i + 3;
+                        let end = tokens[body_at..]
+                            .iter()
+                            .position(|x| x.nl)
+                            .map_or(tokens.len(), |eol| body_at + eol);
+                        let def = directive::DefineFn::new(&tokens[body_at..end])?;
+                        // TODO: 6.10.5p2 — a redefinition must be identical;
+                        // diagnose instead of overwriting
+                        macros.insert(key.clone(), def);
+                        tokens.drain(i..end);
+                    }
+                    [
+                        PPToken { text, kind: PPKind::Ident, .. },
+                        PPToken { text: key, kind: PPKind::Ident, nl: false, .. },
+                        ..,
+                    ] if text.as_str() == "undef" => {
+                        macros.remove(key);
+                        tokens.drain(i..i + 3);
                     }
                     x => {
                         todo!("TODO: {:?}", x);
                         // i += 1;
                     }
                 };
-            } else {
+            } else if !directive::try_expand_at(&mut tokens, i, macros)? {
                 i += 1;
             }
+            // when try_expand_at expanded, stay at `i` and rescan the splice
         }
 
         Ok(tokens)
@@ -270,7 +300,7 @@ fn pp_tokenize(s: &[&char], content: &[char], src: usize) -> Vec<PPToken> {
             let span = get_span(char_text, content, src).unwrap();
             let text: String = char_text.into_iter().cloned().collect();
             i += len;
-            result.push(PPToken { text, kind, nl, ws, span });
+            result.push(PPToken { text, kind, nl, ws, span, hs: HideSet::default() });
             // println!("{:?} {:?}", result.last().unwrap(), kind);
             nl = false;
             ws = false;
@@ -304,7 +334,7 @@ mod tests {
         pp_tokenize(&vec, &fv[0], 0)
     }
 
-    /// `span` is ignored by `PPToken`'s `PartialEq`, so use a dummy one.
+    /// `span` and `hs` are ignored by `PPToken`'s `PartialEq`, so use dummies.
     pub fn tok(text: &str, kind: PPKind, nl: bool, ws: bool) -> PPToken {
         PPToken {
             text: text.to_string(),
@@ -312,7 +342,98 @@ mod tests {
             nl,
             ws,
             span: Span { start: 0, end: 0, src: 0 },
+            hs: HideSet::default(),
         }
+    }
+
+    /// Run the full phase-1..4 pipeline (splice, comments, tokenize,
+    /// directives + macro expansion) over a source string.
+    fn preprocess_str(s: &str) -> Vec<PPToken> {
+        let sm = SourceManager::new();
+        let iter = sm.add_source(
+            s.chars().collect::<Vec<_>>().into_boxed_slice(),
+            std::path::PathBuf::from("test.c"),
+        );
+        let content = filter_esc_nl_and_rep_comments(iter);
+        let mut macros = directive::Macros::default();
+        Lexer::new(&sm).preprocess(&content, &mut macros).unwrap()
+    }
+
+    fn texts(tokens: &[PPToken]) -> Vec<&str> {
+        tokens.iter().map(|t| t.text.as_str()).collect()
+    }
+
+    #[test]
+    fn define_and_expand() {
+        let result = preprocess_str(
+            "#define TIMES(a, b) ((a) * (b))\n#define SIX TIMES(2, 3)\nint x = SIX;\n",
+        );
+
+        #[rustfmt::skip]
+        assert_eq!(
+            texts(&result),
+            ["int", "x", "=", "(", "(", "2", ")", "*", "(", "3", ")", ")", ";"]
+        );
+    }
+
+    #[test]
+    fn define_undef() {
+        let result = preprocess_str("#define A 1\nA\n#undef A\nA\n");
+        assert_eq!(texts(&result), ["1", "A"]);
+    }
+
+    #[test]
+    fn define_terminates() {
+        // hide sets, end to end: the painted survivor stays put
+        let result = preprocess_str("#define x x\nx\n");
+        assert_eq!(texts(&result), ["x"]);
+        assert!(result[0].hs.hides("x"));
+    }
+
+    /// C23 6.10.5.5 EXAMPLE 3 (the parts without `#`/`##`) — the canonical
+    /// hide-set torture test: self-reference (`f`, `z`), reference through
+    /// other macros (`g` → `f`, `t`, `m(m)`), a body with an unbalanced paren
+    /// (`h`), commas produced by expansion *not* splitting arguments (`w`),
+    /// invocations formed across splice boundaries (`h 5)`, `t(...)(1)`), and
+    /// lazy bodies observing `#undef`/redefinition (`x`).
+    ///
+    /// The standard prints the expected expansion:
+    /// ```c
+    /// f(2 * (y+1)) + f(2 * (f(2 * (z[0])))) % f(2 * (0)) + t(1);
+    /// f(2 * (2+(3,4)-0,1)) | f(2 * (~ 5)) & f(2 * (0,1))^m(0,1);
+    /// ```
+    ///
+    /// The snapshot holds the rendered token stream (nl/ws-flag spacing, so
+    /// whitespace is approximate) followed by every token with its hide set.
+    #[test]
+    fn expansion_torture() {
+        let result = preprocess_str(
+            "#define x 3\n\
+             #define f(a) f(x * (a))\n\
+             #undef x\n\
+             #define x 2\n\
+             #define g f\n\
+             #define z z[0]\n\
+             #define h g(~\n\
+             #define m(a) a(w)\n\
+             #define w 0,1\n\
+             #define t(a) a\n\
+             f(y+1) + f(f(z)) % t(t(g)(0) + t)(1);\n\
+             g(x+(3,4)-w) | h 5) & m(f)^m(m);\n",
+        );
+
+        let mut rendered = String::new();
+        for t in &result {
+            if t.nl {
+                rendered.push('\n');
+            } else if t.ws {
+                rendered.push(' ');
+            }
+            rendered.push_str(&t.text);
+        }
+
+        let listing: Vec<String> = result.iter().map(|t| format!("{t:?}")).collect();
+        insta::assert_snapshot!(format!("{}\n\n{}", rendered.trim_start(), listing.join("\n")));
     }
 
     #[test]

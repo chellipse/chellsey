@@ -1,0 +1,97 @@
+---
+source: src/lexer.rs
+expression: "format!(\"{}\\n\\n{}\", rendered.trim_start(), listing.join(\"\\n\"))"
+---
+f( 2 * (y+1)) + f( 2 * ( f( 2 * ( z[0])))) % f( 2 * (0)) + t(1); f( 2 * ( 2+(3,4)- 0,1)) | f( 2 * (~ 5)) & f( 2 * ( 0,1))^m( 0,1);
+
+{f:Ident:{"f"}}
+{(:Punct:{"f"}}
+{2:PPNumber:{"f", "x"}}
+{*:Punct:{"f"}}
+{(:Punct:{"f"}}
+{y:Ident:{"f"}}
+{+:Punct:{"f"}}
+{1:PPNumber:{"f"}}
+{):Punct:{"f"}}
+{):Punct:{"f"}}
+{+:Punct}
+{f:Ident:{"f"}}
+{(:Punct:{"f"}}
+{2:PPNumber:{"f", "x"}}
+{*:Punct:{"f"}}
+{(:Punct:{"f"}}
+{f:Ident:{"f"}}
+{(:Punct:{"f"}}
+{2:PPNumber:{"f", "x"}}
+{*:Punct:{"f"}}
+{(:Punct:{"f"}}
+{z:Ident:{"f", "z"}}
+{[:Punct:{"f", "z"}}
+{0:PPNumber:{"f", "z"}}
+{]:Punct:{"f", "z"}}
+{):Punct:{"f"}}
+{):Punct:{"f"}}
+{):Punct:{"f"}}
+{):Punct:{"f"}}
+{%:Punct}
+{f:Ident:{"t", "f"}}
+{(:Punct:{"t", "f"}}
+{2:PPNumber:{"t", "f", "x"}}
+{*:Punct:{"t", "f"}}
+{(:Punct:{"t", "f"}}
+{0:PPNumber:{"t", "f"}}
+{):Punct:{"t", "f"}}
+{):Punct:{"t", "f"}}
+{+:Punct:{"t"}}
+{t:Ident:{"t"}}
+{(:Punct}
+{1:PPNumber}
+{):Punct}
+{;:Punct}
+{f:Ident:{"f"}}
+{(:Punct:{"f"}}
+{2:PPNumber:{"f", "x"}}
+{*:Punct:{"f"}}
+{(:Punct:{"f"}}
+{2:PPNumber:{"f", "x"}}
+{+:Punct:{"f"}}
+{(:Punct:{"f"}}
+{3:PPNumber:{"f"}}
+{,:Punct:{"f"}}
+{4:PPNumber:{"f"}}
+{):Punct:{"f"}}
+{-:Punct:{"f"}}
+{0:PPNumber:{"f", "w"}}
+{,:Punct:{"f", "w"}}
+{1:PPNumber:{"f", "w"}}
+{):Punct:{"f"}}
+{):Punct:{"f"}}
+{|:Punct}
+{f:Ident:{"f"}}
+{(:Punct:{"f"}}
+{2:PPNumber:{"f", "x"}}
+{*:Punct:{"f"}}
+{(:Punct:{"f"}}
+{~:Punct:{"f", "h"}}
+{5:PPNumber:{"f"}}
+{):Punct:{"f"}}
+{):Punct:{"f"}}
+{&:Punct}
+{f:Ident:{"m", "f"}}
+{(:Punct:{"m", "f"}}
+{2:PPNumber:{"f", "m", "x"}}
+{*:Punct:{"m", "f"}}
+{(:Punct:{"m", "f"}}
+{0:PPNumber:{"f", "m", "w"}}
+{,:Punct:{"f", "m", "w"}}
+{1:PPNumber:{"f", "m", "w"}}
+{):Punct:{"m", "f"}}
+{):Punct:{"m", "f"}}
+{^:Punct}
+{m:Ident:{"m"}}
+{(:Punct:{"m"}}
+{0:PPNumber:{"m", "w"}}
+{,:Punct:{"m", "w"}}
+{1:PPNumber:{"m", "w"}}
+{):Punct:{"m"}}
+{;:Punct}
