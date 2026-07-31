@@ -410,7 +410,7 @@ impl PPToken {
         Ok(Token { kind, span: self.span.clone() })
     }
 
-    fn err(&self, msg: impl fmt::Display) -> Error {
+    pub(crate) fn err(&self, msg: impl fmt::Display) -> Error {
         self.span.clone().into_error(anyhow!("{msg}"))
     }
 
