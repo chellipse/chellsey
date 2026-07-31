@@ -86,17 +86,7 @@ impl<'a> Lexer<'a> {
         let tokens = self.preprocess(&content, &mut macros)?;
         println!("PPTokens: {:?}", &tokens);
 
-        // Phase 5 & 6 ignored
-
-        let mut result = Vec::with_capacity(tokens.len());
-
-        for token in tokens {
-            // `promote` yields a span-carrying `diagnostic::Error`; `?` folds it
-            // into `anyhow`, and `main` resolves it against `SOURCES`.
-            result.push(token.promote()?);
-        }
-
-        Ok(result)
+        promote_all(tokens)
     }
 
     /// Translation phase 4: execute directives and expand macros, in one
@@ -183,6 +173,31 @@ impl<'a> Lexer<'a> {
         let (src, content) = self.sm.latest();
         pp_tokenize(s, content, src)
     }
+}
+
+/// Phases 5–7: promote each preprocessing token into a real token, and
+/// (phase 6) concatenate adjacent string literals into one token whose span
+/// covers the whole run.
+fn promote_all(tokens: Vec<PPToken>) -> Result<Vec<Token>> {
+    let mut result: Vec<Token> = Vec::with_capacity(tokens.len());
+
+    for pp in tokens {
+        // `promote` yields a span-carrying `diagnostic::Error`; `?` folds it
+        // into `anyhow`, and `main` resolves it against `SOURCES`.
+        let token = pp.promote()?;
+
+        if let TokenKind::StrLit { value, .. } = &token.kind
+            && let Some(Token { kind: TokenKind::StrLit { value: prev, .. }, span }) =
+                result.last_mut()
+        {
+            prev.extend_from_slice(value);
+            *span = span.union(&token.span);
+        } else {
+            result.push(token);
+        }
+    }
+
+    Ok(result)
 }
 
 fn filter_esc_nl_and_rep_comments<'a>(
@@ -433,7 +448,11 @@ mod tests {
         }
 
         let listing: Vec<String> = result.iter().map(|t| format!("{t:?}")).collect();
-        insta::assert_snapshot!(format!("{}\n\n{}", rendered.trim_start(), listing.join("\n")));
+        insta::assert_snapshot!(format!(
+            "{}\n\n{}",
+            rendered.trim_start(),
+            listing.join("\n")
+        ));
     }
 
     #[test]
@@ -516,6 +535,123 @@ mod tests {
         ];
 
         assert_eq!(result, expected, "{result:?} != {expected:?}");
+    }
+
+    fn lex_str(s: &str) -> Vec<Token> {
+        promote_all(tokenize(s)).unwrap()
+    }
+
+    fn kinds(tokens: &[Token]) -> Vec<&TokenKind> {
+        tokens.iter().map(|t| &t.kind).collect()
+    }
+
+    #[test]
+    fn promote_ints() {
+        let toks = lex_str(
+            "0 42 1000000 1U 1l 1UL 1LL 1ull 1LLu 0777 010U 0x1F 0Xff 0xDEADBEEFuLL \
+             0b1010 0B1 1'000'000 0xFF'FFu 18446744073709551615",
+        );
+        insta::assert_debug_snapshot!(kinds(&toks));
+    }
+
+    #[test]
+    fn promote_floats() {
+        let toks = lex_str(
+            "1.0 .5f 5.f 3.14159 1e10 1E-10 1.5e+10L 1'000.5 \
+             0x1p0 0x1P0 0x1.8p3 0x1.8p-3 0x.1p4 0x1.p4 0x1p3f 0x1.8p-3L",
+        );
+        insta::assert_debug_snapshot!(kinds(&toks));
+    }
+
+    #[test]
+    fn promote_chars() {
+        let toks = lex_str(r#"'a' '\n' '\0' '\x41' '\'' '\102'"#);
+        insta::assert_debug_snapshot!(kinds(&toks));
+    }
+
+    #[test]
+    fn promote_strings() {
+        let toks = lex_str(r#""ab" "a\tb" "\x41\102" "é" "\0777""#);
+        insta::assert_debug_snapshot!(kinds(&toks));
+    }
+
+    #[test]
+    fn string_concat() {
+        // phase 6: adjacent literals merge; anything else breaks the run
+        let toks = lex_str(r#""foo" "bar" 1 "a" "b" "c""#);
+        assert_eq!(toks.len(), 3);
+        assert!(matches!(&toks[0].kind, TokenKind::StrLit { value, .. } if value == b"foobar"));
+        assert!(matches!(
+            &toks[1].kind,
+            TokenKind::IntConst { value: 1, .. }
+        ));
+        assert!(matches!(&toks[2].kind, TokenKind::StrLit { value, .. } if value == b"abc"));
+    }
+
+    /// Independently derives every order/case combination 6.4.4.1 allows, so
+    /// a typo in `parse_int_suf`'s spelling table can't hide in an untested
+    /// arm.
+    #[test]
+    fn int_suffix_combinations() {
+        for u in ["u", "U"] {
+            for (l, len) in [
+                ("l", IntLen::Long),
+                ("L", IntLen::Long),
+                ("ll", IntLen::LongLong),
+                ("LL", IntLen::LongLong),
+            ] {
+                for s in [format!("1{u}{l}"), format!("1{l}{u}")] {
+                    let toks = lex_str(&s);
+                    assert!(
+                        matches!(
+                            &toks[0].kind,
+                            TokenKind::IntConst { suf: IntSuf { unsigned: true, len: l2 }, .. }
+                                if *l2 == len
+                        ),
+                        "`{s}` should be unsigned {len:?}"
+                    );
+                }
+            }
+            // wb in every valid order/case: still rejected (TBD), not junk
+            for wb in ["wb", "WB"] {
+                for s in [format!("1{u}{wb}"), format!("1{wb}{u}")] {
+                    assert!(tokenize(&s)[0].promote().is_err(), "`{s}` is TBD");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn promote_rejects_invalid() {
+        for src in [
+            "09",
+            "0128",
+            "0x",
+            "0b",
+            "0b2",
+            "1e",
+            "1e+",
+            "123abc",
+            "1ULLULL",
+            "1lL",
+            "1.0.0f",
+            "1.2.3",
+            "0x1.8",
+            "0x1p",
+            "1wb2",
+            "1uwbu",
+            "18446744073709551616",
+            "'ab'",
+            r"'\777'",
+            // valid C23, but `_BitInt` is TBD — must error, not demote to int
+            "1wb",
+            "1uwb",
+            "0x1Fwb",
+        ] {
+            let pp = tokenize(src);
+            assert_eq!(pp.len(), 1, "{src} should be one pp-token");
+            assert!(pp[0].promote().is_err(), "`{src}` should be rejected");
+        }
     }
 
     #[test]

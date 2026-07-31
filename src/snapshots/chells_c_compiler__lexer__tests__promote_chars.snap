@@ -1,0 +1,30 @@
+---
+source: src/lexer.rs
+expression: kinds(&toks)
+---
+[
+    CharConst {
+        value: 97,
+        enc: Plain,
+    },
+    CharConst {
+        value: 10,
+        enc: Plain,
+    },
+    CharConst {
+        value: 0,
+        enc: Plain,
+    },
+    CharConst {
+        value: 65,
+        enc: Plain,
+    },
+    CharConst {
+        value: 39,
+        enc: Plain,
+    },
+    CharConst {
+        value: 66,
+        enc: Plain,
+    },
+]

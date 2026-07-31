@@ -1,0 +1,70 @@
+---
+source: src/lexer.rs
+expression: kinds(&toks)
+---
+[
+    FloatConst {
+        value: 1.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 0.5,
+        suf: Float,
+    },
+    FloatConst {
+        value: 5.0,
+        suf: Float,
+    },
+    FloatConst {
+        value: 3.14159,
+        suf: Double,
+    },
+    FloatConst {
+        value: 10000000000.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 1e-10,
+        suf: Double,
+    },
+    FloatConst {
+        value: 15000000000.0,
+        suf: LongDouble,
+    },
+    FloatConst {
+        value: 1000.5,
+        suf: Double,
+    },
+    FloatConst {
+        value: 1.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 1.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 12.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 0.1875,
+        suf: Double,
+    },
+    FloatConst {
+        value: 1.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 16.0,
+        suf: Double,
+    },
+    FloatConst {
+        value: 8.0,
+        suf: Float,
+    },
+    FloatConst {
+        value: 0.1875,
+        suf: LongDouble,
+    },
+]

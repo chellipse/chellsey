@@ -1,0 +1,139 @@
+---
+source: src/lexer.rs
+expression: kinds(&toks)
+---
+[
+    IntConst {
+        value: 0,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 42,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 1000000,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: true,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: false,
+            len: Long,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: true,
+            len: Long,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: false,
+            len: LongLong,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: true,
+            len: LongLong,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: true,
+            len: LongLong,
+        },
+    },
+    IntConst {
+        value: 511,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 8,
+        suf: IntSuf {
+            unsigned: true,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 31,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 255,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 3735928559,
+        suf: IntSuf {
+            unsigned: true,
+            len: LongLong,
+        },
+    },
+    IntConst {
+        value: 10,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 1,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 1000000,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 65535,
+        suf: IntSuf {
+            unsigned: true,
+            len: Int,
+        },
+    },
+    IntConst {
+        value: 18446744073709551615,
+        suf: IntSuf {
+            unsigned: false,
+            len: Int,
+        },
+    },
+]
