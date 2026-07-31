@@ -92,6 +92,7 @@ fn promote_all(tokens: Vec<PPToken>) -> Result<Vec<Token>> {
     Ok(result)
 }
 
+// TODO: make this not run inside string literals
 fn filter_esc_nl_and_rep_comments<'a>(
     mut iter: Peekable<impl Iterator<Item = &'a char>>,
 ) -> Vec<&'a char> {

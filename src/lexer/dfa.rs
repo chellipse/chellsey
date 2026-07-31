@@ -365,17 +365,17 @@ pub fn dfa_punctuator<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
             (St::Ent, '-') => St::Minus,
             (St::Minus, '-' | '=' | '>') => St::Term,
             (St::Ent, '*') => St::Mul,
-            (St::Mul, '*' | '=') => St::Term,
+            (St::Mul, '=') => St::Term,
             (St::Ent, '/') => St::Div,
-            (St::Div, '/' | '=') => St::Term,
+            (St::Div, '=') => St::Term,
             (St::Ent, '^') => St::Xor,
-            (St::Xor, '^' | '=') => St::Term,
+            (St::Xor, '=') => St::Term,
             (St::Ent, '&') => St::And,
             (St::And, '&' | '=') => St::Term,
             (St::Ent, '|') => St::Or,
             (St::Or, '|' | '=') => St::Term,
             (St::Ent, '!') => St::Not,
-            (St::Not, '!' | '=') => St::Term,
+            (St::Not, '=') => St::Term,
             (St::Ent, '=') => St::Eq,
             (St::Eq, '=') => St::Term,
             (St::Ent, '.') => St::Period0,
@@ -394,7 +394,7 @@ pub fn dfa_punctuator<T: Borrow<char>>(s: &[T]) -> Result<usize, String> {
             (St::Ent, '#') => St::Pound,
             (St::Pound, '#') => St::Term,
             (St::Ent, '%') => St::Percent0,
-            (St::Percent0, '%' | '=' | '>') => St::Term,
+            (St::Percent0, '=' | '>') => St::Term,
             (St::Percent0, ':') => St::Percent1,
             (St::Percent1, '%') => St::Percent2,
             (St::Percent2, ':') => St::Term,
@@ -741,6 +741,14 @@ mod tests {
         assert_eq("!=", Some("!="));
         assert_eq("=", Some("="));
         assert_eq("==", Some("=="));
+
+        // 6.4.6 has no doubled form of these — `a**b` is `a * *b`, `!!x` is
+        // `! !x`, and `%%` is two `%`s
+        assert_eq("**", Some("*"));
+        assert_eq("//", Some("/"));
+        assert_eq("^^", Some("^"));
+        assert_eq("!!", Some("!"));
+        assert_eq("%%", Some("%"));
 
         // --- '<' family: < << <= <<= <: <% ---
         assert_eq("<", Some("<"));
