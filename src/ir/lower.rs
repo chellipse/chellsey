@@ -151,7 +151,25 @@ impl FnBuilder {
                         );
                         Ok(TV { val: Value::Reg(dst), ty })
                     }
-                    UnOp::Not | UnOp::BitNot => {
+                    // `~x` is `x ^ -1`: flipping all 64 bits of the sign-extended
+                    // operand is the correct `int` complement, canonical form and
+                    // all (bit 63 tracks the flipped sign bit).
+                    UnOp::BitNot => {
+                        let dst = self.new_reg();
+                        self.emit(
+                            InstKind::IBin {
+                                dst,
+                                op: IBinOp::Xor,
+                                lhs: operand.val,
+                                rhs: Value::Const(-1),
+                                ty: ir_ty(&ty),
+                                flags: UbFlags::default(),
+                            },
+                            &e.span,
+                        );
+                        Ok(TV { val: Value::Reg(dst), ty })
+                    }
+                    UnOp::Not => {
                         Err(err(&e.span, "this unary operator is not yet supported (TBD)"))
                     }
                 }
