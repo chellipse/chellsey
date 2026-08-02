@@ -50,6 +50,9 @@ fn compile(sources: &SourceManager, path: &Path) -> anyhow::Result<()> {
     let ir = ir::lower(&ast, &info)?;
     println!("IR:\n{ir}");
 
+    // Malformed IR is a compiler bug, not a user error — surface it loudly.
+    ir::verify(&ir).map_err(|e| anyhow::anyhow!("internal compiler error: invalid IR: {e}"))?;
+
     println!("ASM:\n{}", codegen::assembly(&ir)?);
 
     let obj = codegen::emit_object(&ir)?;
