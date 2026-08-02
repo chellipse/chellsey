@@ -69,6 +69,24 @@ pub enum IBinOp {
     LShr,
 }
 
+/// Integer comparison predicates (ME-5). The signed and equality predicates are
+/// produced by lowering in v1; the unsigned orderings arrive with unsigned
+/// types. Result of an `icmp` is a 0/1 `int`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum IPred {
+    Eq,
+    Ne,
+    SLt,
+    SLe,
+    SGt,
+    SGe,
+    ULt,
+    ULe,
+    UGt,
+    UGe,
+}
+
 /// Undefined-behaviour assumptions carried by an integer op (ME-5 design
 /// update, HIR-UB-1). Reserved from day one so `-fwrapv` etc. can suppress a
 /// flag *at generation time*; unused (all `false`) in v1.
@@ -93,7 +111,7 @@ impl Inst {
     /// the frame without matching each kind.
     pub fn dst(&self) -> Option<u32> {
         match &self.kind {
-            InstKind::IBin { dst, .. } => Some(*dst),
+            InstKind::IBin { dst, .. } | InstKind::ICmp { dst, .. } => Some(*dst),
         }
     }
 }
@@ -109,6 +127,9 @@ pub enum InstKind {
         ty: Type,
         flags: UbFlags,
     },
+    /// `%dst = icmp <pred> <ty> lhs, rhs` — `ty` is the operand type; the result
+    /// is a 0/1 `int`.
+    ICmp { dst: u32, pred: IPred, lhs: Value, rhs: Value, ty: Type },
 }
 
 /// A basic block's exit. Defined as an enum so `Br`/`CondBr`/`Switch` slot in
@@ -239,11 +260,31 @@ impl fmt::Display for IBinOp {
     }
 }
 
+impl fmt::Display for IPred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            IPred::Eq => "eq",
+            IPred::Ne => "ne",
+            IPred::SLt => "slt",
+            IPred::SLe => "sle",
+            IPred::SGt => "sgt",
+            IPred::SGe => "sge",
+            IPred::ULt => "ult",
+            IPred::ULe => "ule",
+            IPred::UGt => "ugt",
+            IPred::UGe => "uge",
+        })
+    }
+}
+
 impl fmt::Display for InstKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             InstKind::IBin { dst, op, lhs, rhs, ty, .. } => {
                 write!(f, "%{dst} = {op} {ty} {lhs}, {rhs}")
+            }
+            InstKind::ICmp { dst, pred, lhs, rhs, ty } => {
+                write!(f, "%{dst} = icmp {pred} {ty} {lhs}, {rhs}")
             }
         }
     }

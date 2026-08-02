@@ -1,7 +1,9 @@
 use anyhow::anyhow;
 
 use super::types::*;
-use crate::ast::{BinOp, CType, Expr, ExprKind, ExtDeclKind, Stmt, StmtKind, TranslationUnit, UnOp};
+use crate::ast::{
+    BinOp, CType, Expr, ExprKind, ExtDeclKind, Stmt, StmtKind, TranslationUnit, UnOp,
+};
 use crate::diagnostic::{Error, Span};
 use crate::sema::ProgramInfo;
 
@@ -11,7 +13,6 @@ type Result<T> = std::result::Result<T, Error>;
 /// (ME-2). The type comes from sema's annotation, never a fresh decision here.
 struct TV {
     val: Value,
-    #[allow(dead_code)]
     ty: CType,
 }
 
@@ -74,7 +75,14 @@ impl FnBuilder {
         // `return` overwrites; for `main` an unterminated fall-through becomes
         // `ret 0` (ME-12). A multi-block CFG arrives with control flow (ME-7).
         let entry = Block { id: BlockId(0), insts: Vec::new(), term: Terminator::Ret(None) };
-        Self { name, params, ret_ty, blocks: vec![entry], current: 0, next_reg: 0 }
+        Self {
+            name,
+            params,
+            ret_ty,
+            blocks: vec![entry],
+            current: 0,
+            next_reg: 0,
+        }
     }
 
     fn new_reg(&mut self) -> u32 {
@@ -84,7 +92,9 @@ impl FnBuilder {
     }
 
     fn emit(&mut self, kind: InstKind, span: &Span) {
-        self.blocks[self.current].insts.push(Inst { kind, span: span.clone() });
+        self.blocks[self.current]
+            .insts
+            .push(Inst { kind, span: span.clone() });
     }
 
     fn implicit_return_zero(&mut self) {
@@ -95,7 +105,12 @@ impl FnBuilder {
     }
 
     fn finish(self) -> Function {
-        Function { name: self.name, params: self.params, ret_ty: self.ret_ty, blocks: self.blocks }
+        Function {
+            name: self.name,
+            params: self.params,
+            ret_ty: self.ret_ty,
+            blocks: self.blocks,
+        }
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
@@ -123,10 +138,9 @@ impl FnBuilder {
     /// Lower an expression to a typed value, emitting the instructions it needs
     /// into the current block. `TV.ty` is read from sema's annotation.
     fn expr(&mut self, e: &Expr) -> Result<TV> {
-        let ty = e
-            .ty
-            .clone()
-            .ok_or_else(|| err(&e.span, "internal: expression left untyped by sema"))?;
+        let ty =
+            e.ty.clone()
+                .ok_or_else(|| err(&e.span, "internal: expression left untyped by sema"))?;
 
         match &e.kind {
             ExprKind::IntLit { value, ty: lit_ty } => {
@@ -169,14 +183,26 @@ impl FnBuilder {
                         );
                         Ok(TV { val: Value::Reg(dst), ty })
                     }
-                    UnOp::Not => {
-                        Err(err(&e.span, "this unary operator is not yet supported (TBD)"))
-                    }
+                    UnOp::Not => Err(err(
+                        &e.span,
+                        "this unary operator is not yet supported (TBD)",
+                    )),
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.expr(lhs)?;
                 let r = self.expr(rhs)?;
+                // Relational / equality operators compare the operands and yield
+                // a 0/1 `int` — an `icmp`, not an `IBin`. `ty` on the compare is
+                // the operand type; the result type is `ty` (the outer int).
+                if let Some(pred) = int_pred(op) {
+                    let dst = self.new_reg();
+                    self.emit(
+                        InstKind::ICmp { dst, pred, lhs: l.val, rhs: r.val, ty: ir_ty(&l.ty) },
+                        &e.span,
+                    );
+                    return Ok(TV { val: Value::Reg(dst), ty });
+                }
                 // Operands are signed `int` in this subset, so the signed ops.
                 let ir_op = match op {
                     BinOp::Add => IBinOp::Add,
@@ -223,6 +249,21 @@ fn ir_ty(ct: &CType) -> Type {
         // arrays decay to a pointer; neither is lowered further yet (ME-8).
         CType::Ptr(_) | CType::Array(..) => Type::Ptr,
     }
+}
+
+/// The signed integer comparison predicate for a relational/equality operator,
+/// or `None` for any other operator. `int` is signed, so orderings map to the
+/// signed predicates.
+fn int_pred(op: &BinOp) -> Option<IPred> {
+    Some(match op {
+        BinOp::Lt => IPred::SLt,
+        BinOp::Gt => IPred::SGt,
+        BinOp::Le => IPred::SLe,
+        BinOp::Ge => IPred::SGe,
+        BinOp::Eq => IPred::Eq,
+        BinOp::Ne => IPred::Ne,
+        _ => return None,
+    })
 }
 
 fn err(span: &Span, msg: &str) -> Error {

@@ -171,7 +171,10 @@ impl Parser {
         }
         // `(void)` — an explicit empty parameter list.
         if self.at(TokenKind::Kw(Kw::void))
-            && matches!(self.peek2().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen)))
+            && matches!(
+                self.peek2().map(|t| &t.kind),
+                Some(TokenKind::Punct(Punct::RParen))
+            )
         {
             self.consume(2); // `void` `)`
             return Ok((Vec::new(), false));
@@ -357,9 +360,7 @@ impl Parser {
                 self.consume_expect(TokenKind::Punct(Punct::RParen))?;
                 Ok(inner)
             }
-            TokenKind::Ident { .. } => {
-                Err(self.error("identifiers are not yet supported (TBD)"))
-            }
+            TokenKind::Ident { .. } => Err(self.error("identifiers are not yet supported (TBD)")),
             TokenKind::FloatConst { .. } => {
                 Err(self.error("floating-point literals are not yet supported (TBD)"))
             }
@@ -381,7 +382,9 @@ impl Parser {
 /// The binary operator and its left-binding power (FE-19, lowest→highest all
 /// left-associative), or `None` if the token is not a binary operator.
 fn bin_op(kind: &TokenKind) -> Option<(BinOp, u8)> {
-    let TokenKind::Punct(p) = kind else { return None };
+    let TokenKind::Punct(p) = kind else {
+        return None;
+    };
     let pair = match p {
         Punct::PipePipe => (BinOp::LogOr, 1),
         Punct::AmpAmp => (BinOp::LogAnd, 2),

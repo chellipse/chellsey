@@ -3,7 +3,7 @@ use object::write::{Object, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
 use crate::diagnostic::Error;
-use crate::ir::{self, IBinOp, InstKind, Terminator, Value};
+use crate::ir::{self, IBinOp, IPred, InstKind, Terminator, Value};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -39,6 +39,17 @@ impl Gpr {
             Gpr::Rdx => "rdx",
             Gpr::Rsp => "rsp",
             Gpr::Rbp => "rbp",
+        }
+    }
+
+    /// The low-byte register name, for `setcc`/`movzx` textual output.
+    fn name8(self) -> &'static str {
+        match self {
+            Gpr::Rax => "al",
+            Gpr::Rcx => "cl",
+            Gpr::Rdx => "dl",
+            Gpr::Rsp => "spl",
+            Gpr::Rbp => "bpl",
         }
     }
 }
@@ -124,6 +135,72 @@ impl ShiftOp {
     }
 }
 
+/// Condition codes for `setcc` (and later `jcc`). The signed and equality codes
+/// are produced in v1; the unsigned orderings (B/Ae/Be/A) are reserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Cc {
+    E,
+    Ne,
+    L,
+    Ge,
+    Le,
+    G,
+    B,
+    Ae,
+    Be,
+    A,
+}
+
+impl Cc {
+    /// The tttn nibble added to the `0F 90` (setcc) / `0F 80` (jcc) opcode base.
+    fn code(self) -> u8 {
+        match self {
+            Cc::E => 0x4,
+            Cc::Ne => 0x5,
+            Cc::B => 0x2,
+            Cc::Ae => 0x3,
+            Cc::Be => 0x6,
+            Cc::A => 0x7,
+            Cc::L => 0xC,
+            Cc::Ge => 0xD,
+            Cc::Le => 0xE,
+            Cc::G => 0xF,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Cc::E => "e",
+            Cc::Ne => "ne",
+            Cc::L => "l",
+            Cc::Ge => "ge",
+            Cc::Le => "le",
+            Cc::G => "g",
+            Cc::B => "b",
+            Cc::Ae => "ae",
+            Cc::Be => "be",
+            Cc::A => "a",
+        }
+    }
+}
+
+/// The condition code that materializes an integer comparison predicate.
+fn cc_of(pred: IPred) -> Cc {
+    match pred {
+        IPred::Eq => Cc::E,
+        IPred::Ne => Cc::Ne,
+        IPred::SLt => Cc::L,
+        IPred::SLe => Cc::Le,
+        IPred::SGt => Cc::G,
+        IPred::SGe => Cc::Ge,
+        IPred::ULt => Cc::B,
+        IPred::ULe => Cc::Be,
+        IPred::UGt => Cc::A,
+        IPred::UGe => Cc::Ae,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum MInst {
     PushRbp,
@@ -131,22 +208,26 @@ enum MInst {
     SubRspImm(i32),
     Leave,
     Ret,
-    /// `mov r64, imm`
+    // `mov r64, imm`
     MovRImm { dst: Gpr, imm: i64 },
-    /// `mov r64, [rbp+disp]` (load a spill slot)
+    // `mov r64, [rbp+disp]` (load a spill slot)
     Load { dst: Gpr, disp: i32 },
-    /// `mov [rbp+disp], r64` (store a spill slot)
+    // `mov [rbp+disp], r64` (store a spill slot)
     Store { disp: i32, src: Gpr },
-    /// `<op> dst, src` — reg/reg ALU.
+    // `<op> dst, src` — reg/reg ALU.
     Alu { op: AluOp, dst: Gpr, src: Gpr },
-    /// `imul dst, src` (0F AF)
+    // `imul dst, src` (0F AF)
     IMul { dst: Gpr, src: Gpr },
-    /// `cqo` — sign-extend rax into rdx:rax ahead of `idiv`.
+    // `cqo` — sign-extend rax into rdx:rax ahead of `idiv`.
     Cqo,
-    /// `idiv src` (F7 /7) — rax = rdx:rax / src, rdx = remainder.
+    // `idiv src` (F7 /7) — rax = rdx:rax / src, rdx = remainder.
     Idiv { src: Gpr },
-    /// `<op> dst, cl` (D3 /ext) — shift `dst` by the count in `cl`.
+    // `<op> dst, cl` (D3 /ext) — shift `dst` by the count in `cl`.
     Shift { op: ShiftOp, dst: Gpr },
+    // `setcc dst_l` (0F 90+cc /0) — set `dst`'s low byte to the flag condition.
+    SetCC { cc: Cc, dst: Gpr },
+    // `movzx dst, dst_l` (0F B6 /r) — zero-extend `dst`'s low byte into `dst`.
+    Movzx8 { dst: Gpr },
 }
 
 // ----- instruction selection (§2.1 spill-everything) -----------------------
@@ -194,7 +275,9 @@ impl<'a> FuncSel<'a> {
             Value::Const(c) => code.push(MInst::MovRImm { dst: reg, imm: *c }),
             Value::Reg(n) => code.push(MInst::Load { dst: reg, disp: slot(*n) }),
             Value::FConst(_) => {
-                return Err(self.err("floating-point operands are not yet supported in codegen (TBD)"));
+                return Err(
+                    self.err("floating-point operands are not yet supported in codegen (TBD)")
+                );
             }
         }
         Ok(())
@@ -254,13 +337,23 @@ impl<'a> FuncSel<'a> {
                         Gpr::Rax
                     }
                     _ => {
-                        return Err(inst
-                            .span
-                            .clone()
-                            .into_error(anyhow!("this integer op is not yet supported in codegen (TBD)")));
+                        return Err(inst.span.clone().into_error(anyhow!(
+                            "this integer op is not yet supported in codegen (TBD)"
+                        )));
                     }
                 };
                 code.push(MInst::Store { disp: slot(*dst), src: result });
+                Ok(())
+            }
+            // Compare operands in rax/rcx, materialize the 0/1 result: the flag
+            // condition into al via setcc, then zero-extend it to the full slot.
+            InstKind::ICmp { dst, pred, lhs, rhs, .. } => {
+                self.load(lhs, Gpr::Rax, code)?;
+                self.load(rhs, Gpr::Rcx, code)?;
+                code.push(MInst::Alu { op: AluOp::Cmp, dst: Gpr::Rax, src: Gpr::Rcx });
+                code.push(MInst::SetCC { cc: cc_of(*pred), dst: Gpr::Rax });
+                code.push(MInst::Movzx8 { dst: Gpr::Rax });
+                code.push(MInst::Store { disp: slot(*dst), src: Gpr::Rax });
                 Ok(())
             }
         }
@@ -408,6 +501,19 @@ impl Encoder {
                 self.b(0xD3);
                 self.modrm(0b11, op.ext(), dst.code());
             }
+            MInst::SetCC { cc, dst } => {
+                // setcc r/m8 : 0F (90+cc) /0 — no REX needed for al/cl/dl.
+                self.b(0x0F);
+                self.b(0x90 + cc.code());
+                self.modrm(0b11, 0, dst.code());
+            }
+            MInst::Movzx8 { dst } => {
+                // movzx r64, r/m8 : 48 0F B6 /r
+                self.rex_w(dst.code(), dst.code());
+                self.b(0x0F);
+                self.b(0xB6);
+                self.modrm(0b11, dst.code(), dst.code());
+            }
         }
     }
 }
@@ -429,6 +535,8 @@ fn asm(inst: MInst) -> String {
         MInst::Cqo => "cqo".to_string(),
         MInst::Idiv { src } => format!("idiv {}", src.name()),
         MInst::Shift { op, dst } => format!("{} {}, cl", op.name(), dst.name()),
+        MInst::SetCC { cc, dst } => format!("set{} {}", cc.name(), dst.name8()),
+        MInst::Movzx8 { dst } => format!("movzx {}, {}", dst.name(), dst.name8()),
     }
 }
 

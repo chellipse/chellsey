@@ -142,7 +142,9 @@ impl Sema {
                     // integer promotion: `-int` and `~int` are `int`
                     UnOp::Neg | UnOp::BitNot => CType::INT,
                     UnOp::Not => {
-                        return Err(span.into_error(anyhow!("logical `!` is not yet supported (TBD)")));
+                        return Err(
+                            span.into_error(anyhow!("logical `!` is not yet supported (TBD)"))
+                        );
                     }
                 }
             }
@@ -160,9 +162,14 @@ impl Sema {
                     | BinOp::BitXor
                     | BinOp::Shl
                     | BinOp::Shr => CType::INT,
+                    // relational / equality operators yield a 0/1 `int`
+                    BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
+                        CType::INT
+                    }
                     _ => {
-                        return Err(span
-                            .into_error(anyhow!("this operator is not yet supported (TBD)")));
+                        return Err(
+                            span.into_error(anyhow!("this operator is not yet supported (TBD)"))
+                        );
                     }
                 }
             }

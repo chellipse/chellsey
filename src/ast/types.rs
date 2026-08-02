@@ -18,7 +18,7 @@ pub enum CType {
     Bool,
     Char { signed: bool },
     Short { signed: bool },
-    /// `long` == `long long` == 8 bytes in this model.
+    // `long` == `long long` == 8 bytes in this model.
     Int { signed: bool },
     Long { signed: bool },
     Float,
@@ -148,12 +148,7 @@ pub enum ExtDeclKind {
         body: Stmt,
     },
     /// `ret ident(params);`
-    FuncDecl {
-        ret: CType,
-        ident: String,
-        params: Vec<Param>,
-        varargs: bool,
-    },
+    FuncDecl { ret: CType, ident: String, params: Vec<Param>, varargs: bool },
 }
 
 #[derive(Debug)]
@@ -180,8 +175,8 @@ pub struct Expr {
 
 #[derive(Debug)]
 pub enum ExprKind {
-    /// The literal's own type (from its suffix) rides along in `ty`; the outer
-    /// `Expr.ty` slot is sema's annotation (identical here, distinct in general).
+    // The literal's own type (from its suffix) rides along in `ty`; the outer
+    // `Expr.ty` slot is sema's annotation (identical here, distinct in general).
     IntLit { value: u64, ty: CType },
     Unary { op: UnOp, expr: Box<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
