@@ -153,7 +153,14 @@ impl Sema {
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)?;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => CType::INT,
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Rem
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor => CType::INT,
                     _ => {
                         return Err(span
                             .into_error(anyhow!("this operator is not yet supported (TBD)")));

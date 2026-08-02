@@ -197,6 +197,21 @@ impl<'a> FuncSel<'a> {
                         code.push(MInst::Idiv { src: Gpr::Rcx });
                         Gpr::Rdx // remainder
                     }
+                    // Bitwise ops are bit-parallel, so operating on the full
+                    // 64-bit sign-extended operands keeps the result in the
+                    // canonical form (its bit 63 tracks the `int` sign bit).
+                    IBinOp::And => {
+                        code.push(MInst::Alu { op: AluOp::And, dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
+                    }
+                    IBinOp::Or => {
+                        code.push(MInst::Alu { op: AluOp::Or, dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
+                    }
+                    IBinOp::Xor => {
+                        code.push(MInst::Alu { op: AluOp::Xor, dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
+                    }
                     _ => {
                         return Err(inst
                             .span

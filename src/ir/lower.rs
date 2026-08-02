@@ -166,6 +166,9 @@ impl FnBuilder {
                     BinOp::Mul => IBinOp::Mul,
                     BinOp::Div => IBinOp::SDiv,
                     BinOp::Rem => IBinOp::SRem,
+                    BinOp::BitAnd => IBinOp::And,
+                    BinOp::BitOr => IBinOp::Or,
+                    BinOp::BitXor => IBinOp::Xor,
                     _ => return Err(err(&e.span, "this operator is not yet supported (TBD)")),
                 };
                 let dst = self.new_reg();
