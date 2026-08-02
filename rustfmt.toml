@@ -1,2 +1,4 @@
 edition = "2024"
 struct_lit_width = 62
+unstable_features = true
+struct_variant_width = 62
