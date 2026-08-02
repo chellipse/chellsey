@@ -183,10 +183,21 @@ impl FnBuilder {
                         );
                         Ok(TV { val: Value::Reg(dst), ty })
                     }
-                    UnOp::Not => Err(err(
-                        &e.span,
-                        "this unary operator is not yet supported (TBD)",
-                    )),
+                    // `!x` is `x == 0` — an icmp yielding a 0/1 int.
+                    UnOp::Not => {
+                        let dst = self.new_reg();
+                        self.emit(
+                            InstKind::ICmp {
+                                dst,
+                                pred: IPred::Eq,
+                                lhs: operand.val,
+                                rhs: Value::Const(0),
+                                ty: ir_ty(&operand.ty),
+                            },
+                            &e.span,
+                        );
+                        Ok(TV { val: Value::Reg(dst), ty })
+                    }
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {

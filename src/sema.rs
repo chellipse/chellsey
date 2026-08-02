@@ -139,13 +139,8 @@ impl Sema {
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {
-                    // integer promotion: `-int` and `~int` are `int`
-                    UnOp::Neg | UnOp::BitNot => CType::INT,
-                    UnOp::Not => {
-                        return Err(
-                            span.into_error(anyhow!("logical `!` is not yet supported (TBD)"))
-                        );
-                    }
+                    // `-int`/`~int` promote to `int`; `!` yields a 0/1 `int`
+                    UnOp::Neg | UnOp::BitNot | UnOp::Not => CType::INT,
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
