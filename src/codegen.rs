@@ -228,6 +228,14 @@ enum MInst {
     SetCC { cc: Cc, dst: Gpr },
     // `movzx dst, dst_l` (0F B6 /r) — zero-extend `dst`'s low byte into `dst`.
     Movzx8 { dst: Gpr },
+    // A basic-block label (zero bytes); records its offset for jump fixups.
+    Label(u32),
+    // jmp rel32 to a block label.
+    Jmp(u32),
+    // jcc rel32 to a block label.
+    JmpCC { cc: Cc, target: u32 },
+    // test r/m64, r64 — sets flags from `a & b` (used as `test r, r`).
+    Test { a: Gpr, b: Gpr },
 }
 
 // ----- instruction selection (§2.1 spill-everything) -----------------------
@@ -260,6 +268,7 @@ impl<'a> FuncSel<'a> {
             code.push(MInst::SubRspImm(self.frame));
         }
         for block in &self.func.blocks {
+            code.push(MInst::Label(block.id.0));
             for inst in &block.insts {
                 self.inst(inst, &mut code)?;
             }
@@ -370,6 +379,14 @@ impl<'a> FuncSel<'a> {
                 code.push(MInst::Leave);
                 code.push(MInst::Ret);
             }
+            Terminator::Br(bb) => code.push(MInst::Jmp(bb.0)),
+            Terminator::CondBr { cond, then_bb, else_bb } => {
+                // Branch to `then` when the condition is nonzero, else fall to `else`.
+                let _ = self.load(cond, Gpr::Rax, code);
+                code.push(MInst::Test { a: Gpr::Rax, b: Gpr::Rax });
+                code.push(MInst::JmpCC { cc: Cc::Ne, target: then_bb.0 });
+                code.push(MInst::Jmp(else_bb.0));
+            }
         }
     }
 
@@ -392,6 +409,10 @@ impl<'a> FuncSel<'a> {
 #[derive(Default)]
 struct Encoder {
     out: Vec<u8>,
+    // Byte offset of each block label, indexed by block id.
+    labels: Vec<usize>,
+    // (rel32 byte position, target block id) for each jump awaiting a fixup.
+    fixups: Vec<(usize, u32)>,
 }
 
 impl Encoder {
@@ -514,6 +535,42 @@ impl Encoder {
                 self.b(0xB6);
                 self.modrm(0b11, dst.code(), dst.code());
             }
+            MInst::Label(n) => {
+                let n = n as usize;
+                if n >= self.labels.len() {
+                    self.labels.resize(n + 1, 0);
+                }
+                self.labels[n] = self.out.len();
+            }
+            MInst::Jmp(target) => {
+                // jmp rel32 : E9 cd
+                self.b(0xE9);
+                self.fixups.push((self.out.len(), target));
+                self.le32(0);
+            }
+            MInst::JmpCC { cc, target } => {
+                // jcc rel32 : 0F 80+cc cd
+                self.b(0x0F);
+                self.b(0x80 + cc.code());
+                self.fixups.push((self.out.len(), target));
+                self.le32(0);
+            }
+            MInst::Test { a, b } => {
+                // test r/m64, r64 : 48 85 /r, reg=b, rm=a
+                self.rex_w(b.code(), a.code());
+                self.b(0x85);
+                self.modrm(0b11, b.code(), a.code());
+            }
+        }
+    }
+
+    /// Patch every recorded jump's rel32 to its now-known target label offset.
+    /// rel32 is relative to the end of the jump instruction (`pos + 4`).
+    fn resolve(&mut self) {
+        for i in 0..self.fixups.len() {
+            let (pos, target) = self.fixups[i];
+            let rel = self.labels[target as usize] as i32 - (pos as i32 + 4);
+            self.out[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
         }
     }
 }
@@ -537,6 +594,10 @@ fn asm(inst: MInst) -> String {
         MInst::Shift { op, dst } => format!("{} {}, cl", op.name(), dst.name()),
         MInst::SetCC { cc, dst } => format!("set{} {}", cc.name(), dst.name8()),
         MInst::Movzx8 { dst } => format!("movzx {}, {}", dst.name(), dst.name8()),
+        MInst::Label(n) => format!("bb{n}:"),
+        MInst::Jmp(n) => format!("jmp bb{n}"),
+        MInst::JmpCC { cc, target } => format!("j{} bb{target}", cc.name()),
+        MInst::Test { a, b } => format!("test {}, {}", a.name(), b.name()),
     }
 }
 
@@ -545,7 +606,11 @@ pub fn assembly(program: &ir::Program) -> Result<String> {
     for func in &program.funcs {
         s.push_str(&format!("{}:\n", func.name));
         for inst in FuncSel::new(func).select()? {
-            s.push_str(&format!("    {}\n", asm(inst)));
+            match inst {
+                // Labels sit at the margin; everything else is indented.
+                MInst::Label(n) => s.push_str(&format!("bb{n}:\n")),
+                other => s.push_str(&format!("    {}\n", asm(other))),
+            }
         }
     }
     Ok(s)
@@ -562,6 +627,7 @@ pub fn emit_object(program: &ir::Program) -> anyhow::Result<Vec<u8>> {
         for inst in FuncSel::new(func).select()? {
             enc.encode(inst);
         }
+        enc.resolve();
         let offset = obj.append_section_data(text, &enc.out, 16);
 
         obj.add_symbol(Symbol {

@@ -203,6 +203,7 @@ impl Parser {
             }
             // a nested block builds its own spanned `Stmt`
             TokenKind::Punct(Punct::LBrace) => return self.parse_comp_stmt(),
+            TokenKind::Kw(Kw::_if) => return self.parse_if(),
             // a declaration at statement scope — locals are a later item
             k if is_type_start(k) => {
                 return Err(self.error("local declarations are not yet supported (TBD)"));
@@ -225,6 +226,23 @@ impl Parser {
         }
         self.consume_expect(TokenKind::Punct(Punct::RBrace))?;
         Ok(Stmt { kind: StmtKind::Compound(stmts), span: self.spanned(lo) })
+    }
+
+    /// `if ( expr ) stmt [ else stmt ]`. The `else` binds to the nearest `if`,
+    /// which falls out of parsing the branch as a single statement.
+    fn parse_if(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
+        self.consume(1); // `if`
+        self.consume_expect(TokenKind::Punct(Punct::LParen))?;
+        let cond = self.parse_expr()?;
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+        let then = Box::new(self.parse_stmt()?);
+        let els = if self.eat(TokenKind::Kw(Kw::_else)) {
+            Some(Box::new(self.parse_stmt()?))
+        } else {
+            None
+        };
+        Ok(Stmt { kind: StmtKind::If { cond, then, els }, span: self.spanned(lo) })
     }
 
     // ----- expression tower (FE-19) ----------------------------------------

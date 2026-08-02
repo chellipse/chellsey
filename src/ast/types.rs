@@ -161,6 +161,7 @@ pub struct Stmt {
 pub enum StmtKind {
     Compound(Vec<Stmt>),
     Return(Option<Expr>),
+    If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
     Empty,
 }
 

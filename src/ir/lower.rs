@@ -67,6 +67,9 @@ struct FnBuilder {
     current: usize,
     /// Next SSA register to hand out.
     next_reg: u32,
+    // Whether the current block already has a terminator, so trailing dead
+    // statements and fall-through edges are suppressed.
+    terminated: bool,
 }
 
 impl FnBuilder {
@@ -82,6 +85,7 @@ impl FnBuilder {
             blocks: vec![entry],
             current: 0,
             next_reg: 0,
+            terminated: false,
         }
     }
 
@@ -89,6 +93,26 @@ impl FnBuilder {
         let r = self.next_reg;
         self.next_reg += 1;
         r
+    }
+
+    /// Append a fresh, open block (default `ret void` terminator) and return its id.
+    fn new_block(&mut self) -> BlockId {
+        let id = BlockId(self.blocks.len() as u32);
+        self.blocks
+            .push(Block { id, insts: Vec::new(), term: Terminator::Ret(None) });
+        id
+    }
+
+    /// Make `bb` the block that subsequent instructions append to.
+    fn switch_to(&mut self, bb: BlockId) {
+        self.current = bb.0 as usize;
+        self.terminated = false;
+    }
+
+    /// Set the current block's terminator and mark it closed.
+    fn set_term(&mut self, term: Terminator) {
+        self.blocks[self.current].term = term;
+        self.terminated = true;
     }
 
     fn emit(&mut self, kind: InstKind, span: &Span) {
@@ -114,6 +138,10 @@ impl FnBuilder {
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        // Statements following a terminator (e.g. after `return`) are dead.
+        if self.terminated {
+            return Ok(());
+        }
         match &stmt.kind {
             StmtKind::Compound(stmts) => {
                 for s in stmts {
@@ -128,7 +156,31 @@ impl FnBuilder {
                     Some(e) => Some(self.expr(e)?.val),
                     None => None,
                 };
-                self.blocks[self.current].term = Terminator::Ret(val);
+                self.set_term(Terminator::Ret(val));
+                Ok(())
+            }
+            StmtKind::If { cond, then, els } => {
+                let c = self.expr(cond)?;
+                let then_bb = self.new_block();
+                let else_bb = self.new_block();
+                let cont_bb = self.new_block();
+                self.set_term(Terminator::CondBr { cond: c.val, then_bb, else_bb });
+
+                self.switch_to(then_bb);
+                self.stmt(then)?;
+                if !self.terminated {
+                    self.set_term(Terminator::Br(cont_bb));
+                }
+
+                self.switch_to(else_bb);
+                if let Some(els) = els {
+                    self.stmt(els)?;
+                }
+                if !self.terminated {
+                    self.set_term(Terminator::Br(cont_bb));
+                }
+
+                self.switch_to(cont_bb);
                 Ok(())
             }
             StmtKind::Empty => Ok(()),

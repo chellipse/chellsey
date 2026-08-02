@@ -137,6 +137,8 @@ pub enum InstKind {
 #[derive(Debug)]
 pub enum Terminator {
     Ret(Option<Value>),
+    Br(BlockId),
+    CondBr { cond: Value, then_bb: BlockId, else_bb: BlockId },
 }
 
 #[derive(Debug)]
@@ -295,6 +297,10 @@ impl fmt::Display for Terminator {
         match self {
             Terminator::Ret(None) => f.write_str("ret void"),
             Terminator::Ret(Some(v)) => write!(f, "ret {v}"),
+            Terminator::Br(bb) => write!(f, "br {bb}"),
+            Terminator::CondBr { cond, then_bb, else_bb } => {
+                write!(f, "condbr {cond}, {then_bb}, {else_bb}")
+            }
         }
     }
 }
