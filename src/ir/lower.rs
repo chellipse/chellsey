@@ -187,6 +187,9 @@ impl FnBuilder {
                     BinOp::BitAnd => IBinOp::And,
                     BinOp::BitOr => IBinOp::Or,
                     BinOp::BitXor => IBinOp::Xor,
+                    BinOp::Shl => IBinOp::Shl,
+                    // `int` is signed, so `>>` is an arithmetic shift.
+                    BinOp::Shr => IBinOp::AShr,
                     _ => return Err(err(&e.span, "this operator is not yet supported (TBD)")),
                 };
                 let dst = self.new_reg();

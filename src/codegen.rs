@@ -94,6 +94,36 @@ impl AluOp {
     }
 }
 
+/// Variable-count shifts (`OP r/m64, cl`), sharing the `D3` opcode and taking
+/// their count implicitly in `cl`. `Shr` (logical) is reserved for unsigned
+/// types, which the subset does not have yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ShiftOp {
+    Shl,
+    Sar,
+    Shr,
+}
+
+impl ShiftOp {
+    /// The ModRM `reg` extension digit selecting the shift within the `D3` group.
+    fn ext(self) -> u8 {
+        match self {
+            ShiftOp::Shl => 4, // /4
+            ShiftOp::Shr => 5, // /5
+            ShiftOp::Sar => 7, // /7
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ShiftOp::Shl => "shl",
+            ShiftOp::Shr => "shr",
+            ShiftOp::Sar => "sar",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum MInst {
     PushRbp,
@@ -115,6 +145,8 @@ enum MInst {
     Cqo,
     /// `idiv src` (F7 /7) — rax = rdx:rax / src, rdx = remainder.
     Idiv { src: Gpr },
+    /// `<op> dst, cl` (D3 /ext) — shift `dst` by the count in `cl`.
+    Shift { op: ShiftOp, dst: Gpr },
 }
 
 // ----- instruction selection (§2.1 spill-everything) -----------------------
@@ -210,6 +242,15 @@ impl<'a> FuncSel<'a> {
                     }
                     IBinOp::Xor => {
                         code.push(MInst::Alu { op: AluOp::Xor, dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
+                    }
+                    // The count is already in rcx (so in cl); shift rax by it.
+                    IBinOp::Shl => {
+                        code.push(MInst::Shift { op: ShiftOp::Shl, dst: Gpr::Rax });
+                        Gpr::Rax
+                    }
+                    IBinOp::AShr => {
+                        code.push(MInst::Shift { op: ShiftOp::Sar, dst: Gpr::Rax });
                         Gpr::Rax
                     }
                     _ => {
@@ -361,6 +402,12 @@ impl Encoder {
                 self.b(0xF7);
                 self.modrm(0b11, 7, src.code());
             }
+            MInst::Shift { op, dst } => {
+                // OP r/m64, cl : 48 D3 /ext
+                self.rex_w(0, dst.code());
+                self.b(0xD3);
+                self.modrm(0b11, op.ext(), dst.code());
+            }
         }
     }
 }
@@ -381,6 +428,7 @@ fn asm(inst: MInst) -> String {
         MInst::IMul { dst, src } => format!("imul {}, {}", dst.name(), src.name()),
         MInst::Cqo => "cqo".to_string(),
         MInst::Idiv { src } => format!("idiv {}", src.name()),
+        MInst::Shift { op, dst } => format!("{} {}, cl", op.name(), dst.name()),
     }
 }
 

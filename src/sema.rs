@@ -157,7 +157,9 @@ impl Sema {
                     | BinOp::Rem
                     | BinOp::BitAnd
                     | BinOp::BitOr
-                    | BinOp::BitXor => CType::INT,
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr => CType::INT,
                     _ => {
                         return Err(span
                             .into_error(anyhow!("this operator is not yet supported (TBD)")));
