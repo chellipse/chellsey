@@ -1,129 +1,402 @@
-use anyhow::Result;
+use anyhow::anyhow;
 use object::write::{Object, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
-use crate::ir::{self, Terminator, Value};
+use crate::diagnostic::Error;
+use crate::ir::{self, IBinOp, InstKind, Terminator, Value};
 
-#[derive(Debug, Clone, Copy)]
-enum MInst {
-    MovImm { dst: Reg, imm: i32 },
-    AddImm { dst: Reg, imm: i32 },
-    Ret,
+type Result<T> = std::result::Result<T, Error>;
+
+// ----- registers & frame layout (BE-1) -------------------------------------
+
+/// The general-purpose registers this backend touches. The full SysV register
+/// file (rsi/rdi/r8/r9 for argument passing) arrives with the call ABI (BE-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gpr {
+    Rax,
+    Rcx,
+    Rdx,
+    Rsp,
+    Rbp,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Reg {
-    Eax,
-}
-
-impl Reg {
+impl Gpr {
+    /// The 3-bit register number used in ModRM/opcode encodings.
     fn code(self) -> u8 {
         match self {
-            Reg::Eax => 0,
+            Gpr::Rax => 0,
+            Gpr::Rcx => 1,
+            Gpr::Rdx => 2,
+            Gpr::Rsp => 4,
+            Gpr::Rbp => 5,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            Reg::Eax => "eax",
+            Gpr::Rax => "rax",
+            Gpr::Rcx => "rcx",
+            Gpr::Rdx => "rdx",
+            Gpr::Rsp => "rsp",
+            Gpr::Rbp => "rbp",
         }
     }
 }
 
-fn select(func: &ir::Function) -> Vec<MInst> {
-    let mut out = Vec::new();
-    for block in &func.blocks {
-        for inst in &block.insts {
-            match inst {
-                // Single-accumulator model. With only literals and left-assoc
-                // `+` (no parens), exactly one value is ever live and it stays
-                // in eax. So an add's lhs, when a value-ref, is *already* in eax
-                // and needs no load; only a constant lhs is materialized. The
-                // rhs is always an immediate. This holds until >1 value can be
-                // live at once (parens, variables, a reused value) — at which
-                // point it must grow to stack slots / real register allocation.
-                ir::Inst::Add { lhs, rhs, .. } => {
-                    if let Value::Const(c) = lhs {
-                        out.push(MInst::MovImm { dst: Reg::Eax, imm: *c as i32 });
+/// The byte displacement of SSA value `%v`'s spill slot: `[rbp - 8*(v+1)]`
+/// (§2.1 spill-everything: one fixed 8-byte slot per value).
+fn slot(v: u32) -> i32 {
+    -8 * (v as i32 + 1)
+}
+
+fn align_to(n: i32, a: i32) -> i32 {
+    (n + a - 1) / a * a
+}
+
+// ----- machine instructions (BE-1 / BE-3) ----------------------------------
+
+/// x86-64 ALU operations sharing the reg/reg `OP r/m64, r64` encoding form.
+/// The full BE-3 set is defined; only `Add`/`Sub` are produced by lowering in
+/// v1 (the rest are wired as their IR ops land).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum AluOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Cmp,
+}
+
+impl AluOp {
+    /// The primary opcode of the `OP r/m64, r64` form.
+    fn opcode(self) -> u8 {
+        match self {
+            AluOp::Add => 0x01,
+            AluOp::Sub => 0x29,
+            AluOp::And => 0x21,
+            AluOp::Or => 0x09,
+            AluOp::Xor => 0x31,
+            AluOp::Cmp => 0x39,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            AluOp::Add => "add",
+            AluOp::Sub => "sub",
+            AluOp::And => "and",
+            AluOp::Or => "or",
+            AluOp::Xor => "xor",
+            AluOp::Cmp => "cmp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MInst {
+    PushRbp,
+    MovRbpRsp,
+    SubRspImm(i32),
+    Leave,
+    Ret,
+    /// `mov r64, imm`
+    MovRImm { dst: Gpr, imm: i64 },
+    /// `mov r64, [rbp+disp]` (load a spill slot)
+    Load { dst: Gpr, disp: i32 },
+    /// `mov [rbp+disp], r64` (store a spill slot)
+    Store { disp: i32, src: Gpr },
+    /// `<op> dst, src` — reg/reg ALU.
+    Alu { op: AluOp, dst: Gpr, src: Gpr },
+    /// `imul dst, src` (0F AF)
+    IMul { dst: Gpr, src: Gpr },
+    /// `cqo` — sign-extend rax into rdx:rax ahead of `idiv`.
+    Cqo,
+    /// `idiv src` (F7 /7) — rax = rdx:rax / src, rdx = remainder.
+    Idiv { src: Gpr },
+}
+
+// ----- instruction selection (§2.1 spill-everything) -----------------------
+
+struct FuncSel<'a> {
+    func: &'a ir::Function,
+    /// 16-byte-aligned frame size reserved by the prologue.
+    frame: i32,
+}
+
+impl<'a> FuncSel<'a> {
+    fn new(func: &'a ir::Function) -> Self {
+        // One 8-byte slot per SSA value. Values are numbered densely from 0, so
+        // the highest `dst` + 1 is the count.
+        let n_values = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter_map(|i| i.dst())
+            .map(|d| d + 1)
+            .max()
+            .unwrap_or(0);
+        let frame = align_to(n_values as i32 * 8, 16);
+        Self { func, frame }
+    }
+
+    fn select(&self) -> Result<Vec<MInst>> {
+        let mut code = vec![MInst::PushRbp, MInst::MovRbpRsp];
+        if self.frame > 0 {
+            code.push(MInst::SubRspImm(self.frame));
+        }
+        for block in &self.func.blocks {
+            for inst in &block.insts {
+                self.inst(inst, &mut code)?;
+            }
+            self.term(&block.term, &mut code);
+        }
+        Ok(code)
+    }
+
+    /// Load an IR operand into `reg`: an immediate is materialized, a register
+    /// operand is loaded from its slot.
+    fn load(&self, v: &Value, reg: Gpr, code: &mut Vec<MInst>) -> Result<()> {
+        match v {
+            Value::Const(c) => code.push(MInst::MovRImm { dst: reg, imm: *c }),
+            Value::Reg(n) => code.push(MInst::Load { dst: reg, disp: slot(*n) }),
+            Value::FConst(_) => {
+                return Err(self.err("floating-point operands are not yet supported in codegen (TBD)"));
+            }
+        }
+        Ok(())
+    }
+
+    fn inst(&self, inst: &ir::Inst, code: &mut Vec<MInst>) -> Result<()> {
+        match &inst.kind {
+            // Execute: load operands into rax/rcx, compute, store to `dst`.
+            InstKind::IBin { dst, op, lhs, rhs, .. } => {
+                self.load(lhs, Gpr::Rax, code)?;
+                self.load(rhs, Gpr::Rcx, code)?;
+                let result = match op {
+                    IBinOp::Add => {
+                        code.push(MInst::Alu { op: AluOp::Add, dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
                     }
-                    match rhs {
-                        Value::Const(c) => {
-                            out.push(MInst::AddImm { dst: Reg::Eax, imm: *c as i32 })
-                        }
-                        Value::Reg(_) => {
-                            unreachable!("rhs is always an immediate without parens")
-                        }
+                    IBinOp::Sub => {
+                        code.push(MInst::Alu { op: AluOp::Sub, dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
                     }
+                    IBinOp::Mul => {
+                        code.push(MInst::IMul { dst: Gpr::Rax, src: Gpr::Rcx });
+                        Gpr::Rax
+                    }
+                    IBinOp::SDiv => {
+                        code.push(MInst::Cqo);
+                        code.push(MInst::Idiv { src: Gpr::Rcx });
+                        Gpr::Rax // quotient
+                    }
+                    IBinOp::SRem => {
+                        code.push(MInst::Cqo);
+                        code.push(MInst::Idiv { src: Gpr::Rcx });
+                        Gpr::Rdx // remainder
+                    }
+                    _ => {
+                        return Err(inst
+                            .span
+                            .clone()
+                            .into_error(anyhow!("this integer op is not yet supported in codegen (TBD)")));
+                    }
+                };
+                code.push(MInst::Store { disp: slot(*dst), src: result });
+                Ok(())
+            }
+        }
+    }
+
+    fn term(&self, term: &Terminator, code: &mut Vec<MInst>) {
+        match term {
+            Terminator::Ret(v) => {
+                if let Some(v) = v {
+                    // The IR is well-typed by the time it reaches here, so a bad
+                    // operand can't occur; ignore the (impossible) load error.
+                    let _ = self.load(v, Gpr::Rax, code);
+                }
+                code.push(MInst::Leave);
+                code.push(MInst::Ret);
+            }
+        }
+    }
+
+    fn err(&self, msg: &str) -> Error {
+        // Anchor at the function's first instruction if there is one.
+        let span = self
+            .func
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .map(|i| i.span.clone())
+            .next()
+            .expect("codegen error only reachable with instructions present");
+        span.into_error(anyhow!("{msg}"))
+    }
+}
+
+// ----- encoding (BE-1) ------------------------------------------------------
+
+#[derive(Default)]
+struct Encoder {
+    out: Vec<u8>,
+}
+
+impl Encoder {
+    fn b(&mut self, byte: u8) {
+        self.out.push(byte);
+    }
+
+    fn le32(&mut self, v: i32) {
+        self.out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// A REX prefix with W set (64-bit operand), promoting the high bits of the
+    /// `reg` and `rm` fields for r8..r15 (unused by the current register set).
+    fn rex_w(&mut self, reg: u8, rm: u8) {
+        let mut rex = 0x48; // 0100 1000 = REX.W
+        if reg >= 8 {
+            rex |= 0x04; // REX.R
+        }
+        if rm >= 8 {
+            rex |= 0x01; // REX.B
+        }
+        self.b(rex);
+    }
+
+    fn modrm(&mut self, mode: u8, reg: u8, rm: u8) {
+        self.b((mode << 6) | ((reg & 7) << 3) | (rm & 7));
+    }
+
+    /// A `[rbp + disp32]` memory operand. rbp (rm=101) is never the SIB escape,
+    /// so no SIB byte; disp32 covers any frame offset.
+    fn mem_rbp(&mut self, reg: u8, disp: i32) {
+        self.modrm(0b10, reg, Gpr::Rbp.code());
+        self.le32(disp);
+    }
+
+    fn encode(&mut self, inst: MInst) {
+        match inst {
+            MInst::PushRbp => self.b(0x55), // 50+rd, rd = rbp
+            MInst::MovRbpRsp => {
+                // mov rbp, rsp : 48 89 /r, reg=rsp, rm=rbp, mod=11
+                self.rex_w(Gpr::Rsp.code(), Gpr::Rbp.code());
+                self.b(0x89);
+                self.modrm(0b11, Gpr::Rsp.code(), Gpr::Rbp.code());
+            }
+            MInst::SubRspImm(imm) => {
+                // sub rsp, imm32 : 48 81 /5 id
+                self.rex_w(0, Gpr::Rsp.code());
+                self.b(0x81);
+                self.modrm(0b11, 5, Gpr::Rsp.code());
+                self.le32(imm);
+            }
+            MInst::Leave => self.b(0xC9),
+            MInst::Ret => self.b(0xC3),
+            MInst::MovRImm { dst, imm } => {
+                if let Ok(imm32) = i32::try_from(imm) {
+                    // mov r64, imm32 (sign-extended) : 48 C7 /0 id
+                    self.rex_w(0, dst.code());
+                    self.b(0xC7);
+                    self.modrm(0b11, 0, dst.code());
+                    self.le32(imm32);
+                } else {
+                    // movabs r64, imm64 : 48 B8+rd io
+                    self.rex_w(0, dst.code());
+                    self.b(0xB8 + (dst.code() & 7));
+                    self.out.extend_from_slice(&imm.to_le_bytes());
                 }
             }
-        }
-
-        // Multiple blocks would need labels/branches — a single-block concern to
-        // solve with control flow.
-        match &block.term {
-            Terminator::Ret(Some(Value::Const(c))) => {
-                out.push(MInst::MovImm { dst: Reg::Eax, imm: *c as i32 });
-                out.push(MInst::Ret);
+            MInst::Load { dst, disp } => {
+                // mov r64, [rbp+disp] : 48 8B /r
+                self.rex_w(dst.code(), Gpr::Rbp.code());
+                self.b(0x8B);
+                self.mem_rbp(dst.code(), disp);
             }
-            // the returned value is the last one computed, already in eax
-            Terminator::Ret(Some(Value::Reg(_))) => out.push(MInst::Ret),
-            Terminator::Ret(None) => out.push(MInst::Ret),
+            MInst::Store { disp, src } => {
+                // mov [rbp+disp], r64 : 48 89 /r
+                self.rex_w(src.code(), Gpr::Rbp.code());
+                self.b(0x89);
+                self.mem_rbp(src.code(), disp);
+            }
+            MInst::Alu { op, dst, src } => {
+                // OP r/m64, r64 : 48 <op> /r, reg=src, rm=dst, mod=11
+                self.rex_w(src.code(), dst.code());
+                self.b(op.opcode());
+                self.modrm(0b11, src.code(), dst.code());
+            }
+            MInst::IMul { dst, src } => {
+                // imul r64, r/m64 : 48 0F AF /r, reg=dst, rm=src
+                self.rex_w(dst.code(), src.code());
+                self.b(0x0F);
+                self.b(0xAF);
+                self.modrm(0b11, dst.code(), src.code());
+            }
+            MInst::Cqo => {
+                // cqo : 48 99
+                self.b(0x48);
+                self.b(0x99);
+            }
+            MInst::Idiv { src } => {
+                // idiv r/m64 : 48 F7 /7
+                self.rex_w(0, src.code());
+                self.b(0xF7);
+                self.modrm(0b11, 7, src.code());
+            }
         }
     }
-    out
 }
 
-fn encode(inst: MInst, out: &mut Vec<u8>) {
-    match inst {
-        // B8+rd id : mov r32, imm32
-        MInst::MovImm { dst, imm } => {
-            out.push(0xB8 + dst.code());
-            out.extend_from_slice(&imm.to_le_bytes());
-        }
-        // 05 id : add eax, imm32 (eax-specific short form, no ModRM)
-        MInst::AddImm { dst: Reg::Eax, imm } => {
-            out.push(0x05);
-            out.extend_from_slice(&imm.to_le_bytes());
-        }
-        // C3 : ret
-        MInst::Ret => out.push(0xC3),
-    }
-}
+// ----- textual form (--dump-asm) -------------------------------------------
 
 fn asm(inst: MInst) -> String {
     match inst {
-        MInst::MovImm { dst, imm } => format!("mov {}, {imm}", dst.name()),
-        MInst::AddImm { dst, imm } => format!("add {}, {imm}", dst.name()),
+        MInst::PushRbp => "push rbp".to_string(),
+        MInst::MovRbpRsp => "mov rbp, rsp".to_string(),
+        MInst::SubRspImm(imm) => format!("sub rsp, {imm}"),
+        MInst::Leave => "leave".to_string(),
         MInst::Ret => "ret".to_string(),
+        MInst::MovRImm { dst, imm } => format!("mov {}, {imm}", dst.name()),
+        MInst::Load { dst, disp } => format!("mov {}, [rbp{disp:+}]", dst.name()),
+        MInst::Store { disp, src } => format!("mov [rbp{disp:+}], {}", src.name()),
+        MInst::Alu { op, dst, src } => format!("{} {}, {}", op.name(), dst.name(), src.name()),
+        MInst::IMul { dst, src } => format!("imul {}, {}", dst.name(), src.name()),
+        MInst::Cqo => "cqo".to_string(),
+        MInst::Idiv { src } => format!("idiv {}", src.name()),
     }
 }
 
-pub fn assembly(program: &ir::Program) -> String {
+pub fn assembly(program: &ir::Program) -> Result<String> {
     let mut s = String::new();
-    for func in &program.functions {
+    for func in &program.funcs {
         s.push_str(&format!("{}:\n", func.name));
-        for inst in select(func) {
+        for inst in FuncSel::new(func).select()? {
             s.push_str(&format!("    {}\n", asm(inst)));
         }
     }
-    s
+    Ok(s)
 }
 
-pub fn emit_object(program: &ir::Program) -> Result<Vec<u8>> {
+// ----- object emission (relocatable ELF) -----------------------------------
+
+pub fn emit_object(program: &ir::Program) -> anyhow::Result<Vec<u8>> {
     let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = obj.section_id(StandardSection::Text);
 
-    for func in &program.functions {
-        let mut code = Vec::new();
-        for inst in select(func) {
-            encode(inst, &mut code);
+    for func in &program.funcs {
+        let mut enc = Encoder::default();
+        for inst in FuncSel::new(func).select()? {
+            enc.encode(inst);
         }
-        let offset = obj.append_section_data(text, &code, 16);
+        let offset = obj.append_section_data(text, &enc.out, 16);
 
         obj.add_symbol(Symbol {
             name: func.name.clone().into_bytes(),
             value: offset,
-            size: code.len() as u64,
+            size: enc.out.len() as u64,
             kind: SymbolKind::Text,
             scope: SymbolScope::Linkage, // global, so the linker can resolve `main`
             weak: false,

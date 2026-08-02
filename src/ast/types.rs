@@ -1,4 +1,118 @@
+use std::fmt;
+
 use crate::diagnostic::Span;
+use crate::lexer::{IntLen, IntSuf};
+
+/// The sema-level C type model (x86-64 System V layout). Kept *language-level*
+/// and closed/small for v1: qualifiers, `typeof`, etc. are resolved before a
+/// `CType` is formed. This is deliberately *not* the IR type — the extensible
+/// machine-type lattice lives in `ir::types` (FE-1 design update).
+///
+/// The full base-type set is defined up front; the parser only builds the
+/// variants it can lower today (`int`/`void`, plus the integer variants the
+/// literal-suffix machinery produces), and the rest are wired incrementally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum CType {
+    Void,
+    Bool,
+    Char { signed: bool },
+    Short { signed: bool },
+    /// `long` == `long long` == 8 bytes in this model.
+    Int { signed: bool },
+    Long { signed: bool },
+    Float,
+    Double,
+    Ptr(Box<CType>),
+    Array(Box<CType>, usize),
+}
+
+#[allow(dead_code)]
+impl CType {
+    pub const INT: CType = CType::Int { signed: true };
+    pub const CHAR: CType = CType::Char { signed: true };
+    pub const ULONG: CType = CType::Long { signed: false };
+
+    /// Size in bytes (System V x86-64).
+    pub fn size(&self) -> usize {
+        match self {
+            CType::Void => 0,
+            CType::Bool | CType::Char { .. } => 1,
+            CType::Short { .. } => 2,
+            CType::Int { .. } | CType::Float => 4,
+            CType::Long { .. } | CType::Double | CType::Ptr(_) => 8,
+            CType::Array(elem, n) => elem.size() * n,
+        }
+    }
+
+    /// Alignment in bytes: a scalar aligns to its size; an array aligns to its
+    /// element's alignment.
+    pub fn align(&self) -> usize {
+        match self {
+            CType::Array(elem, _) => elem.align(),
+            other => other.size().max(1),
+        }
+    }
+
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            CType::Bool
+                | CType::Char { .. }
+                | CType::Short { .. }
+                | CType::Int { .. }
+                | CType::Long { .. }
+        )
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, CType::Float | CType::Double)
+    }
+
+    pub fn is_arith(&self) -> bool {
+        self.is_integer() || self.is_float()
+    }
+
+    /// Signedness of an integer type; non-integers (and `bool`) report `false`.
+    pub fn is_signed(&self) -> bool {
+        match self {
+            CType::Char { signed }
+            | CType::Short { signed }
+            | CType::Int { signed }
+            | CType::Long { signed } => *signed,
+            _ => false,
+        }
+    }
+
+    /// The referenced element type of a pointer or array, if any.
+    pub fn pointee(&self) -> Option<&CType> {
+        match self {
+            CType::Ptr(inner) | CType::Array(inner, _) => Some(inner),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CType::Void => f.write_str("void"),
+            CType::Bool => f.write_str("bool"),
+            CType::Char { signed: true } => f.write_str("char"),
+            CType::Char { signed: false } => f.write_str("unsigned char"),
+            CType::Short { signed: true } => f.write_str("short"),
+            CType::Short { signed: false } => f.write_str("unsigned short"),
+            CType::Int { signed: true } => f.write_str("int"),
+            CType::Int { signed: false } => f.write_str("unsigned int"),
+            CType::Long { signed: true } => f.write_str("long"),
+            CType::Long { signed: false } => f.write_str("unsigned long"),
+            CType::Float => f.write_str("float"),
+            CType::Double => f.write_str("double"),
+            CType::Ptr(inner) => write!(f, "{inner} *"),
+            CType::Array(inner, n) => write!(f, "{inner}[{n}]"),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct TranslationUnit {
@@ -12,16 +126,33 @@ pub struct ExtDecl {
     pub span: Span,
 }
 
+/// One formal parameter of a function declarator. Nothing in the v1 subset
+/// constructs one yet (parameters are TBD — only `()`/`(void)` parse), but the
+/// FE-14 shape is fixed now so parameter parsing widens rather than reshapes.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct Param {
+    pub ty: CType,
+    pub name: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub enum ExtDeclKind {
+    /// `ret ident(params) { body }`
     FuncDef {
-        type_spec: Vec<String>,
+        ret: CType,
         ident: String,
+        params: Vec<Param>,
+        varargs: bool,
         body: Stmt,
     },
-    Decl {
-        type_spec: Vec<String>,
+    /// `ret ident(params);`
+    FuncDecl {
+        ret: CType,
         ident: String,
+        params: Vec<Param>,
+        varargs: bool,
     },
 }
 
@@ -35,16 +166,70 @@ pub struct Stmt {
 pub enum StmtKind {
     Compound(Vec<Stmt>),
     Return(Option<Expr>),
+    Empty,
 }
 
 #[derive(Debug)]
 pub struct Expr {
     pub kind: ExprKind,
+    /// The expression's type, computed and filled in by sema's pass 2 (§2.7:
+    /// sema annotates, the middle-end consumes). `None` until then.
+    pub ty: Option<CType>,
     pub span: Span,
 }
 
 #[derive(Debug)]
 pub enum ExprKind {
-    IntLit(u64),
-    Add(Box<Expr>, Box<Expr>),
+    /// The literal's own type (from its suffix) rides along in `ty`; the outer
+    /// `Expr.ty` slot is sema's annotation (identical here, distinct in general).
+    IntLit { value: u64, ty: CType },
+    Unary { op: UnOp, expr: Box<Expr> },
+    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+}
+
+/// Binary operators (FE-19). The full set is defined; only `+ - * / %` are
+/// wired through sema/lowering in v1, the rest are clean TBD diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Shl,
+    Shr,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Eq,
+    Ne,
+    BitAnd,
+    BitOr,
+    BitXor,
+    LogAnd,
+    LogOr,
+}
+
+/// Prefix operators that fold into a `Unary` node (FE-19). `Neg` is wired;
+/// `Not`/`BitNot` parse but are TBD in sema. `*`/`&`/`++`/`--` are distinct
+/// node kinds (not yet in this subset), so they TBD in the parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    Neg,
+    Not,
+    BitNot,
+}
+
+/// Pick the type of an integer literal from its suffix (6.4.4.1). Magnitude
+/// escalation (a value too large for the suffixed type widening to the next
+/// rank) is a later refinement; the suffix alone drives the type for now.
+pub fn int_lit(value: u64, suf: IntSuf) -> ExprKind {
+    let signed = !suf.unsigned;
+    let ty = match suf.len {
+        IntLen::Int => CType::Int { signed },
+        // `long` and `long long` share one 8-byte model.
+        IntLen::Long | IntLen::LongLong => CType::Long { signed },
+    };
+    ExprKind::IntLit { value, ty }
 }

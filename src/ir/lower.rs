@@ -1,92 +1,206 @@
-use super::types::*;
-use crate::ast::{Expr, ExprKind, ExtDeclKind, Stmt, StmtKind, TranslationUnit};
+use anyhow::anyhow;
 
-pub fn lower(unit: &TranslationUnit) -> Program {
-    let mut functions = Vec::new();
-    for decl in &unit.decls {
-        match &decl.kind {
-            ExtDeclKind::FuncDef { type_spec, ident, body } => {
-                functions.push(lower_function(ident, type_spec, body));
-            }
-            // TODO: lower a file-scope Decl into a global.
-            ExtDeclKind::Decl { .. } => {}
-        }
-    }
-    Program { functions }
+use super::types::*;
+use crate::ast::{BinOp, CType, Expr, ExprKind, ExtDeclKind, Stmt, StmtKind, TranslationUnit, UnOp};
+use crate::diagnostic::{Error, Span};
+use crate::sema::ProgramInfo;
+
+type Result<T> = std::result::Result<T, Error>;
+
+/// A typed value — an IR operand paired with the sema `CType` that produced it
+/// (ME-2). The type comes from sema's annotation, never a fresh decision here.
+struct TV {
+    val: Value,
+    #[allow(dead_code)]
+    ty: CType,
 }
 
-fn lower_function(name: &str, type_spec: &[String], body: &Stmt) -> Function {
-    let mut b = FnBuilder::new(name.to_string(), lower_type(type_spec));
-    b.stmt(body);
-    b.finish()
+pub fn lower(unit: &TranslationUnit, info: &ProgramInfo) -> Result<Program> {
+    let low = Lowerer { info };
+    let mut funcs = Vec::new();
+    for decl in &unit.decls {
+        match &decl.kind {
+            ExtDeclKind::FuncDef { ident, body, .. } => {
+                funcs.push(low.function(ident, body)?);
+            }
+            // A prototype contributes a signature (already in `info`) but no code.
+            ExtDeclKind::FuncDecl { .. } => {}
+        }
+    }
+    Ok(Program { funcs, data: Vec::new() })
+}
+
+/// Cross-function lowering state. Near-empty in v1 (string interning and the
+/// global-data table arrive with ME-11); it owns the `ProgramInfo` borrow that
+/// per-function lowering consults for signatures.
+struct Lowerer<'a> {
+    info: &'a ProgramInfo,
+}
+
+impl Lowerer<'_> {
+    fn function(&self, name: &str, body: &Stmt) -> Result<Function> {
+        let sig = self
+            .info
+            .funcs
+            .get(name)
+            .expect("sema collected every defined function's signature");
+        let params = sig.params.iter().map(ir_ty).collect();
+        let ret_ty = ir_ty(&sig.ret);
+
+        let mut b = FnBuilder::new(name.to_string(), params, ret_ty);
+        b.stmt(body)?;
+        // ME-12: `main` falling off the end returns 0.
+        if name == "main" {
+            b.implicit_return_zero();
+        }
+        Ok(b.finish())
+    }
 }
 
 struct FnBuilder {
     name: String,
+    params: Vec<Type>,
     ret_ty: Type,
-    blocks: Vec<BasicBlock>,
+    blocks: Vec<Block>,
+    /// Index into `blocks` of the block instructions currently append to.
     current: usize,
-    /// Next SSA value number to hand out.
-    next_val: usize,
+    /// Next SSA register to hand out.
+    next_reg: u32,
 }
 
 impl FnBuilder {
-    fn new(name: String, ret_ty: Type) -> Self {
-        // Entry block. Its terminator defaults to an implicit `ret void`, which
-        // an explicit `return` overwrites (and which covers an empty body).
-        let entry = BasicBlock { id: BlockId(0), insts: Vec::new(), term: Terminator::Ret(None) };
-        Self { name, ret_ty, blocks: vec![entry], current: 0, next_val: 0 }
+    fn new(name: String, params: Vec<Type>, ret_ty: Type) -> Self {
+        // Entry block. Its terminator defaults to `ret void`, which an explicit
+        // `return` overwrites; for `main` an unterminated fall-through becomes
+        // `ret 0` (ME-12). A multi-block CFG arrives with control flow (ME-7).
+        let entry = Block { id: BlockId(0), insts: Vec::new(), term: Terminator::Ret(None) };
+        Self { name, params, ret_ty, blocks: vec![entry], current: 0, next_reg: 0 }
     }
 
-    fn stmt(&mut self, stmt: &Stmt) {
-        match &stmt.kind {
-            StmtKind::Compound(stmts) => {
-                for s in stmts {
-                    self.stmt(s);
-                }
-            }
-            StmtKind::Return(expr) => {
-                let val = expr.as_ref().map(|e| self.expr(e));
-                self.blocks[self.current].term = Terminator::Ret(val);
-            }
-        }
+    fn new_reg(&mut self) -> u32 {
+        let r = self.next_reg;
+        self.next_reg += 1;
+        r
     }
 
-    /// Lower an expression, emitting whatever instructions it needs into the
-    /// current block, and returning the `Value` that holds its result. This is
-    /// the SSA construction: a leaf is a `Value` directly; a composite emits an
-    /// instruction and returns the fresh value it defines.
-    fn expr(&mut self, e: &Expr) -> Value {
-        match &e.kind {
-            // widening the u64 literal into the operand's i64 store is fine for
-            // the constants we currently accept.
-            ExprKind::IntLit(v) => Value::Const(*v as i64),
-            ExprKind::Add(lhs, rhs) => {
-                let lhs = self.expr(lhs);
-                let rhs = self.expr(rhs);
-                let dst = self.next_val;
-                self.next_val += 1;
-                self.blocks[self.current]
-                    .insts
-                    .push(Inst::Add { dst, lhs, rhs });
-                Value::Reg(dst)
-            }
+    fn emit(&mut self, kind: InstKind, span: &Span) {
+        self.blocks[self.current].insts.push(Inst { kind, span: span.clone() });
+    }
+
+    fn implicit_return_zero(&mut self) {
+        let term = &mut self.blocks[self.current].term;
+        if matches!(term, Terminator::Ret(None)) {
+            *term = Terminator::Ret(Some(Value::Const(0)));
         }
     }
 
     fn finish(self) -> Function {
-        Function { name: self.name, ret_ty: self.ret_ty, blocks: self.blocks }
+        Function { name: self.name, params: self.params, ret_ty: self.ret_ty, blocks: self.blocks }
+    }
+
+    fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        match &stmt.kind {
+            StmtKind::Compound(stmts) => {
+                for s in stmts {
+                    self.stmt(s)?;
+                }
+                Ok(())
+            }
+            StmtKind::Return(expr) => {
+                // ME-12: the value is converted to the declared return type. In
+                // this all-`int` subset the conversion is the identity.
+                let val = match expr {
+                    Some(e) => Some(self.expr(e)?.val),
+                    None => None,
+                };
+                self.blocks[self.current].term = Terminator::Ret(val);
+                Ok(())
+            }
+            StmtKind::Empty => Ok(()),
+        }
+    }
+
+    /// Lower an expression to a typed value, emitting the instructions it needs
+    /// into the current block. `TV.ty` is read from sema's annotation.
+    fn expr(&mut self, e: &Expr) -> Result<TV> {
+        let ty = e
+            .ty
+            .clone()
+            .ok_or_else(|| err(&e.span, "internal: expression left untyped by sema"))?;
+
+        match &e.kind {
+            ExprKind::IntLit { value, ty: lit_ty } => {
+                Ok(TV { val: Value::Const(*value as i64), ty: lit_ty.clone() })
+            }
+            ExprKind::Unary { op, expr } => {
+                let operand = self.expr(expr)?;
+                match op {
+                    // ME-5: unary minus lowers as `0 - x`.
+                    UnOp::Neg => {
+                        let dst = self.new_reg();
+                        self.emit(
+                            InstKind::IBin {
+                                dst,
+                                op: IBinOp::Sub,
+                                lhs: Value::Const(0),
+                                rhs: operand.val,
+                                ty: ir_ty(&ty),
+                                flags: UbFlags::default(),
+                            },
+                            &e.span,
+                        );
+                        Ok(TV { val: Value::Reg(dst), ty })
+                    }
+                    UnOp::Not | UnOp::BitNot => {
+                        Err(err(&e.span, "this unary operator is not yet supported (TBD)"))
+                    }
+                }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let l = self.expr(lhs)?;
+                let r = self.expr(rhs)?;
+                // Operands are signed `int` in this subset, so the signed ops.
+                let ir_op = match op {
+                    BinOp::Add => IBinOp::Add,
+                    BinOp::Sub => IBinOp::Sub,
+                    BinOp::Mul => IBinOp::Mul,
+                    BinOp::Div => IBinOp::SDiv,
+                    BinOp::Rem => IBinOp::SRem,
+                    _ => return Err(err(&e.span, "this operator is not yet supported (TBD)")),
+                };
+                let dst = self.new_reg();
+                self.emit(
+                    InstKind::IBin {
+                        dst,
+                        op: ir_op,
+                        lhs: l.val,
+                        rhs: r.val,
+                        ty: ir_ty(&ty),
+                        flags: UbFlags::default(),
+                    },
+                    &e.span,
+                );
+                Ok(TV { val: Value::Reg(dst), ty })
+            }
+        }
     }
 }
 
-fn lower_type(spec: &[String]) -> Type {
-    match spec
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        ["void"] => Type::Void,
-        _ => Type::I32,
+/// Map a sema `CType` to its IR machine type.
+fn ir_ty(ct: &CType) -> Type {
+    match ct {
+        CType::Void => Type::Void,
+        CType::Bool | CType::Char { .. } => Type::I8,
+        CType::Short { .. } => Type::I16,
+        CType::Int { .. } => Type::I32,
+        CType::Long { .. } => Type::I64,
+        CType::Float => Type::F32,
+        CType::Double => Type::F64,
+        // arrays decay to a pointer; neither is lowered further yet (ME-8).
+        CType::Ptr(_) | CType::Array(..) => Type::Ptr,
     }
+}
+
+fn err(span: &Span, msg: &str) -> Error {
+    span.clone().into_error(anyhow!("{msg}"))
 }

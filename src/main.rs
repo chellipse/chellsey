@@ -19,6 +19,7 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     let sources = SourceManager::new();
+    let mut failed = false;
     for path in cli.input.iter() {
         if let Err(e) = compile(&sources, path) {
             // A span-carrying error resolves against the source store;
@@ -27,7 +28,11 @@ fn main() {
                 Some(diag) => sources.report(diag),
                 None => eprintln!("error: {e:?}"),
             }
+            failed = true;
         }
+    }
+    if failed {
+        std::process::exit(1);
     }
 }
 
@@ -35,17 +40,17 @@ fn compile(sources: &SourceManager, path: &Path) -> anyhow::Result<()> {
     let tokens = lexer::Lexer::new(sources).lex(path)?;
     println!("Tokens: {:?}", &tokens);
 
-    let ast = ast::Parser::new(tokens).parse()?;
+    let mut ast = ast::Parser::new(tokens).parse()?;
     println!("AST: {:?}", &ast);
 
-    let sr = sema::Sema::new().analyze(&ast);
-    println!("SEMA: {sr:?}");
-    sr?;
+    // Sema annotates the AST (pass 2 fills each expression's type) and hands the
+    // middle-end a `ProgramInfo`; the AST is frozen afterwards.
+    let info = sema::Sema::new().analyze(&mut ast)?;
 
-    let ir = ir::lower(&ast);
+    let ir = ir::lower(&ast, &info)?;
     println!("IR:\n{ir}");
 
-    println!("ASM:\n{}", codegen::assembly(&ir));
+    println!("ASM:\n{}", codegen::assembly(&ir)?);
 
     let obj = codegen::emit_object(&ir)?;
     let out = path.with_extension("o");
