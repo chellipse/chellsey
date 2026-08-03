@@ -208,6 +208,15 @@ impl Sema {
                 self.loop_depth -= 1;
                 Ok(())
             }
+            StmtKind::DoWhile { body, cond } => {
+                // Body first (it always runs once), then the controlling
+                // expression, which lives in the enclosing scope.
+                self.loop_depth += 1;
+                self.check_stmt(body, ret)?;
+                self.loop_depth -= 1;
+                self.check_expr(cond)?;
+                Ok(())
+            }
             StmtKind::For { init, cond, step, body } => {
                 // The for clause opens a scope enclosing cond, step, and body
                 // (6.8.5.3); the body's own block still nests inside it.

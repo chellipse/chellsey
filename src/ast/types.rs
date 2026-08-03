@@ -169,6 +169,12 @@ pub enum StmtKind {
         cond: Expr,
         body: Box<Stmt>,
     },
+    // `do body while (cond);` — the body runs once before the first test;
+    // `continue` targets the condition (6.8.6.2).
+    DoWhile {
+        body: Box<Stmt>,
+        cond: Expr,
+    },
     // `for (init; cond; step) body` — absent clauses are None; `init` is a
     // declaration or an expression statement; an absent cond is always true.
     For {

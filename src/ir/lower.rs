@@ -276,6 +276,33 @@ impl FnBuilder {
                 self.switch_to(exit_bb);
                 Ok(())
             }
+            StmtKind::DoWhile { body, cond } => {
+                // The body runs before the first test; the back edge re-enters
+                // it. `continue` jumps to the condition, `break` past the loop.
+                let body_bb = self.new_block();
+                let cond_bb = self.new_block();
+                let exit_bb = self.new_block();
+                self.set_term(Terminator::Br(body_bb));
+
+                self.switch_to(body_bb);
+                self.loops.push((cond_bb, exit_bb));
+                self.stmt(body)?;
+                self.loops.pop();
+                if !self.terminated {
+                    self.set_term(Terminator::Br(cond_bb));
+                }
+
+                self.switch_to(cond_bb);
+                let c = self.expr(cond)?;
+                self.set_term(Terminator::CondBr {
+                    cond: c.val,
+                    then_bb: body_bb, // the back edge
+                    else_bb: exit_bb,
+                });
+
+                self.switch_to(exit_bb);
+                Ok(())
+            }
             StmtKind::For { init, cond, step, body } => {
                 // The for-clause scope (6.8.5.3): an init declaration is
                 // visible in cond, step, and body, and dies at the loop's end.

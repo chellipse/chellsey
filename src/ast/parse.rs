@@ -260,9 +260,7 @@ impl Parser {
             TokenKind::Kw(Kw::_if) => return self.parse_if(),
             TokenKind::Kw(Kw::_while) => return self.parse_while(),
             TokenKind::Kw(Kw::_for) => return self.parse_for(),
-            TokenKind::Kw(Kw::_do) => {
-                return Err(self.error("`do`/`while` loops are not yet supported (TBD)"));
-            }
+            TokenKind::Kw(Kw::_do) => return self.parse_do_while(),
             TokenKind::Kw(Kw::_break) => {
                 self.consume(1);
                 self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
@@ -369,6 +367,19 @@ impl Parser {
         self.consume_expect(TokenKind::Punct(Punct::RParen))?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt { kind: StmtKind::While { cond, body }, span: self.spanned(lo) })
+    }
+
+    /// `do stmt while ( expr ) ;` — the body runs once before the first test.
+    fn parse_do_while(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
+        self.consume(1); // `do`
+        let body = Box::new(self.parse_stmt()?);
+        self.consume_expect(TokenKind::Kw(Kw::_while))?;
+        self.consume_expect(TokenKind::Punct(Punct::LParen))?;
+        let cond = self.parse_expr()?;
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+        self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+        Ok(Stmt { kind: StmtKind::DoWhile { body, cond }, span: self.spanned(lo) })
     }
 
     // ----- expression tower (FE-19) ----------------------------------------
