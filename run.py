@@ -119,19 +119,32 @@ def main() -> int:
 
     refcc = os.environ["REFCC"]
     refcc_flags = shlex.split(os.environ["REFCC_FLAGS"])
-    # Where our compiler drops the object: `<stem>.o` next to the source
-    # (this is `path.with_extension("o")` in src/main.rs).
-    obj = src.with_suffix(".o")
+    # The suite hands workers a prebuilt binary via CC_BIN so parallel runs don't
+    # each race `cargo run` on the shared build lock; standalone use falls back to
+    # building on demand with cargo.
+    cc = os.environ.get("CC_BIN")
 
     with tempfile.TemporaryDirectory() as tmp:
         ref_bin = Path(tmp) / "ref"
         our_bin = Path(tmp) / "ours"
+        # Our compiler drops the object here (via -o) in a fresh temp dir, so a
+        # run can never accidentally link a stale `.o` left by a prior compile.
+        obj = Path(tmp) / "ours.o"
 
         # fmt: off
         stage(2, "reference compile", [
             refcc, *refcc_flags, "-fuse-ld=mold", "-O0", "-g", str(src), "-o", str(ref_bin),
         ])
-        stage(3, "our compile", ["cargo", "run", "--quiet", "--", str(src)])
+        our_compile = (
+            [cc, str(src), "-o", str(obj)] if cc
+            else ["cargo", "run", "--quiet", "--", str(src), "-o", str(obj)]
+        )
+        stage(3, "our compile", our_compile)
+        # The temp dir is empty, so a compiler that exits 0 without writing the
+        # object can't slip through by linking something else — make it explicit.
+        if not obj.is_file():
+            bad("our compile succeeded but produced no object")
+            return 3
         stage(4, f"link {obj}", [
             refcc, *refcc_flags, "-fuse-ld=mold", "-z", "noexecstack", str(obj), "-o", str(our_bin),
         ])
