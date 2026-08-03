@@ -182,7 +182,37 @@ impl Parser {
         Err(self.error("function parameters are not yet supported (TBD)"))
     }
 
-    // ----- statements (FE-17) ----------------------------------------------
+    // ----- statements (FE-16 / FE-17) --------------------------------------
+
+    /// A block item (6.8.2): a declaration or a statement. Only compound-
+    /// statement bodies contain declarations; a branch/loop body is a plain
+    /// statement, which is why `parse_stmt` itself rejects them.
+    fn parse_block_item(&mut self) -> Result<Stmt> {
+        if is_type_start(&self.peek()?.kind) {
+            return self.parse_decl();
+        }
+        self.parse_stmt()
+    }
+
+    /// `ty ident [= init] ;` — a single declarator with an optional
+    /// initializer. Declarator lists (`int a, b;`), pointer/array declarators,
+    /// and local function declarations are FE-16's widening and TBD here.
+    fn parse_decl(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
+        let ty = self.parse_type_specifiers()?;
+        let name = self.parse_ident()?;
+        // an initializer is an assignment-expression (6.7.10) — `,` stays out
+        let init = if self.eat(TokenKind::Punct(Punct::Eq)) {
+            Some(self.parse_assign()?)
+        } else {
+            None
+        };
+        if self.at(TokenKind::Punct(Punct::Comma)) {
+            return Err(self.error("declarator lists are not yet supported (TBD)"));
+        }
+        self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+        Ok(Stmt { kind: StmtKind::Decl { ty, name, init }, span: self.spanned(lo) })
+    }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let lo = self.cursor;
@@ -204,12 +234,18 @@ impl Parser {
             // a nested block builds its own spanned `Stmt`
             TokenKind::Punct(Punct::LBrace) => return self.parse_comp_stmt(),
             TokenKind::Kw(Kw::_if) => return self.parse_if(),
-            // a declaration at statement scope — locals are a later item
+            // a declaration is a block item, not a statement (6.8.2), so it
+            // cannot be the branch of an `if` — C requires the braces.
             k if is_type_start(k) => {
-                return Err(self.error("local declarations are not yet supported (TBD)"));
+                return Err(self.error("a declaration is not a statement; wrap it in `{ }`"));
             }
-            // expression statements, control flow, labels, ... are later items
-            _ => return Err(self.error("this statement form is not yet supported (TBD)")),
+            // control flow, labels, ... are later items; everything else is an
+            // expression statement: `expr ;`
+            _ => {
+                let expr = self.parse_expr()?;
+                self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+                StmtKind::Expr(expr)
+            }
         };
 
         Ok(Stmt { kind, span: self.spanned(lo) })
@@ -222,7 +258,7 @@ impl Parser {
         while let Ok(tok) = self.peek()
             && tok.kind != TokenKind::Punct(Punct::RBrace)
         {
-            stmts.push(self.parse_stmt()?);
+            stmts.push(self.parse_block_item()?);
         }
         self.consume_expect(TokenKind::Punct(Punct::RBrace))?;
         Ok(Stmt { kind: StmtKind::Compound(stmts), span: self.spanned(lo) })
@@ -260,13 +296,21 @@ impl Parser {
         Ok(expr)
     }
 
-    /// `parse_assign` — assignment and compound-assignment are TBD.
+    /// `parse_assign` — simple assignment, right-associative (`x = y = 5`).
+    /// The lvalue check on the left operand is sema's (6.5.16); compound
+    /// assignment (`+=` ...) is a distinct surface node later and TBD here.
     fn parse_assign(&mut self) -> Result<Expr> {
         let lhs = self.parse_cond()?;
+        if self.eat(TokenKind::Punct(Punct::Eq)) {
+            let rhs = self.parse_assign()?;
+            let span = lhs.span.union(&rhs.span);
+            let kind = ExprKind::Assign { lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            return Ok(Expr { kind, ty: None, span });
+        }
         if let Ok(tok) = self.peek()
             && is_assign_op(&tok.kind)
         {
-            return Err(self.error("assignment is not yet supported (TBD)"));
+            return Err(self.error("compound assignment is not yet supported (TBD)"));
         }
         Ok(lhs)
     }
@@ -361,8 +405,8 @@ impl Parser {
         Ok(expr)
     }
 
-    /// `parse_primary` — integer literals and parenthesised expressions.
-    /// Identifiers and every other literal kind are later items and TBD here.
+    /// `parse_primary` — integer literals, identifiers, and parenthesised
+    /// expressions. Every other literal kind is a later item and TBD here.
     fn parse_primary(&mut self) -> Result<Expr> {
         let lo = self.cursor;
         match self.peek()?.kind.clone() {
@@ -378,7 +422,14 @@ impl Parser {
                 self.consume_expect(TokenKind::Punct(Punct::RParen))?;
                 Ok(inner)
             }
-            TokenKind::Ident { .. } => Err(self.error("identifiers are not yet supported (TBD)")),
+            TokenKind::Ident { value } => {
+                self.consume(1);
+                Ok(Expr {
+                    kind: ExprKind::Ident { name: value },
+                    ty: None,
+                    span: self.spanned(lo),
+                })
+            }
             TokenKind::FloatConst { .. } => {
                 Err(self.error("floating-point literals are not yet supported (TBD)"))
             }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::anyhow;
 
 use super::types::*;
@@ -70,6 +72,12 @@ struct FnBuilder {
     // Whether the current block already has a terminator, so trailing dead
     // statements and fall-through edges are suppressed.
     terminated: bool,
+    /// The function's stack-slot table (MIR-STR-4): one slot per local.
+    slots: Vec<Type>,
+    // Name → slot, one map per open block scope (innermost last). This mirrors
+    // sema's scope discipline exactly, so a name resolves to the same
+    // declaration in both walks; sema already diagnosed the failures.
+    scopes: Vec<HashMap<String, SlotId>>,
 }
 
 impl FnBuilder {
@@ -86,6 +94,9 @@ impl FnBuilder {
             current: 0,
             next_reg: 0,
             terminated: false,
+            slots: Vec::new(),
+            // the function scope; parameters will land here (FE-14)
+            scopes: vec![HashMap::new()],
         }
     }
 
@@ -93,6 +104,24 @@ impl FnBuilder {
         let r = self.next_reg;
         self.next_reg += 1;
         r
+    }
+
+    /// Reserve a stack slot for a local and return its id.
+    fn new_slot(&mut self, ty: Type) -> SlotId {
+        let id = SlotId(self.slots.len() as u32);
+        self.slots.push(ty);
+        id
+    }
+
+    /// Resolve a name to its slot, innermost scope first. Sema diagnosed every
+    /// unresolved name, so failure here is a compiler bug.
+    fn lookup(&self, name: &str) -> SlotId {
+        *self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name))
+            .expect("sema resolved every identifier")
     }
 
     /// Append a fresh, open block (default `ret void` terminator) and return its id.
@@ -133,6 +162,7 @@ impl FnBuilder {
             name: self.name,
             params: self.params,
             ret_ty: self.ret_ty,
+            slots: self.slots,
             blocks: self.blocks,
         }
     }
@@ -144,9 +174,27 @@ impl FnBuilder {
         }
         match &stmt.kind {
             StmtKind::Compound(stmts) => {
+                self.scopes.push(HashMap::new());
                 for s in stmts {
                     self.stmt(s)?;
                 }
+                self.scopes.pop();
+                Ok(())
+            }
+            StmtKind::Decl { ty, name, init } => {
+                // The name enters scope before its initializer (6.2.1p7,
+                // matching sema); the initializer is just a store to the slot.
+                let slot = self.new_slot(ir_ty(ty));
+                self.scopes.last_mut().unwrap().insert(name.clone(), slot);
+                if let Some(init) = init {
+                    let v = self.expr(init)?;
+                    self.emit(InstKind::Store { slot, val: v.val, ty: ir_ty(ty) }, &stmt.span);
+                }
+                Ok(())
+            }
+            StmtKind::Expr(expr) => {
+                // evaluated for its side effects; the value is discarded
+                self.expr(expr)?;
                 Ok(())
             }
             StmtKind::Return(expr) => {
@@ -197,6 +245,24 @@ impl FnBuilder {
         match &e.kind {
             ExprKind::IntLit { value, ty: lit_ty } => {
                 Ok(TV { val: Value::Const(*value as i64), ty: lit_ty.clone() })
+            }
+            // a variable read: load its stack slot into a fresh register
+            ExprKind::Ident { name } => {
+                let slot = self.lookup(name);
+                let dst = self.new_reg();
+                self.emit(InstKind::Load { dst, slot, ty: ir_ty(&ty) }, &e.span);
+                Ok(TV { val: Value::Reg(dst), ty })
+            }
+            // `lhs = rhs`: evaluate the rhs, store it to the lvalue's slot; the
+            // assignment's own value is the value stored (6.5.16.1).
+            ExprKind::Assign { lhs, rhs } => {
+                let v = self.expr(rhs)?;
+                let ExprKind::Ident { name } = &lhs.kind else {
+                    return Err(err(&lhs.span, "internal: non-lvalue assignment target past sema"));
+                };
+                let slot = self.lookup(name);
+                self.emit(InstKind::Store { slot, val: v.val, ty: ir_ty(&ty) }, &e.span);
+                Ok(TV { val: v.val, ty })
             }
             ExprKind::Unary { op, expr } => {
                 let operand = self.expr(expr)?;

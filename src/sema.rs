@@ -29,6 +29,9 @@ pub struct ProgramInfo {
 #[derive(Default)]
 pub struct Sema {
     info: ProgramInfo,
+    // The block-scope stack of the function being checked, innermost last.
+    // Each scope maps a declared name to its type (6.2.1).
+    scopes: Vec<HashMap<String, CType>>,
 }
 
 impl Sema {
@@ -50,6 +53,9 @@ impl Sema {
             if let ExtDeclKind::FuncDef { ret, body, .. } = &mut decl.kind {
                 // `ret` is not touched by the walk, so this split borrow is fine.
                 let ret = ret.clone();
+                // A fresh function scope; parameters will populate it (FE-14).
+                self.scopes.clear();
+                self.scopes.push(HashMap::new());
                 self.check_stmt(body, &ret)?;
             }
         }
@@ -106,14 +112,45 @@ impl Sema {
 
     // ----- pass 2: type annotation + subset legality -----------------------
 
-    fn check_stmt(&self, stmt: &mut Stmt, ret: &CType) -> Result<()> {
+    /// Resolve a name against the scope stack, innermost scope first.
+    fn lookup(&self, name: &str) -> Option<&CType> {
+        self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+
+    fn check_stmt(&mut self, stmt: &mut Stmt, ret: &CType) -> Result<()> {
         match &mut stmt.kind {
             StmtKind::Compound(stmts) => {
+                // a block opens a scope; its declarations vanish at the `}`
+                self.scopes.push(HashMap::new());
                 for s in stmts {
                     self.check_stmt(s, ret)?;
                 }
+                self.scopes.pop();
                 Ok(())
             }
+            StmtKind::Decl { ty, name, init } => {
+                // v1 subset: only `int` locals are modelled end-to-end.
+                if *ty != CType::INT {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("only `int` locals are supported (TBD)")));
+                }
+                let scope = self.scopes.last_mut().unwrap();
+                if scope.insert(name.clone(), ty.clone()).is_some() {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("redeclaration of `{name}`")));
+                }
+                // The name is in scope for its own initializer (6.2.1p7), so
+                // `int x = x;` resolves — to the uninitialized `x` — as C says.
+                if let Some(init) = init {
+                    self.check_expr(init)?;
+                }
+                Ok(())
+            }
+            StmtKind::Expr(expr) => self.check_expr(expr),
             StmtKind::If { cond, then, els } => {
                 self.check_expr(cond)?;
                 self.check_stmt(then, ret)?;
@@ -144,6 +181,29 @@ impl Sema {
         let span = expr.span.clone();
         let ty = match &mut expr.kind {
             ExprKind::IntLit { ty, .. } => ty.clone(),
+            // an identifier's type is its declaration's
+            ExprKind::Ident { name } => match self.lookup(name) {
+                Some(ty) => ty.clone(),
+                None if self.info.funcs.contains_key(name.as_str()) => {
+                    return Err(span
+                        .into_error(anyhow!("function designators are not yet supported (TBD)")));
+                }
+                None => {
+                    return Err(span.into_error(anyhow!("use of undeclared identifier `{name}`")));
+                }
+            },
+            ExprKind::Assign { lhs, rhs } => {
+                // The modifiable-lvalue check (6.5.16): a declared name is the
+                // only lvalue in this subset.
+                if !matches!(lhs.kind, ExprKind::Ident { .. }) {
+                    return Err(span.into_error(anyhow!("left operand of `=` is not assignable")));
+                }
+                self.check_expr(lhs)?;
+                self.check_expr(rhs)?;
+                // the assignment's type is the lhs's (conversions are identity
+                // in the all-`int` subset)
+                lhs.ty.clone().expect("just annotated")
+            }
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {

@@ -3,7 +3,7 @@ use object::write::{Object, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
 use crate::diagnostic::Error;
-use crate::ir::{self, IBinOp, IPred, InstKind, Terminator, Value};
+use crate::ir::{self, IBinOp, IPred, InstKind, SlotId, Terminator, Value};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -56,7 +56,7 @@ impl Gpr {
 
 /// The byte displacement of SSA value `%v`'s spill slot: `[rbp - 8*(v+1)]`
 /// (§2.1 spill-everything: one fixed 8-byte slot per value).
-fn slot(v: u32) -> i32 {
+fn spill(v: u32) -> i32 {
     -8 * (v as i32 + 1)
 }
 
@@ -242,6 +242,8 @@ enum MInst {
 
 struct FuncSel<'a> {
     func: &'a ir::Function,
+    /// Number of SSA values; the locals' stack slots sit below their spills.
+    n_values: u32,
     /// 16-byte-aligned frame size reserved by the prologue.
     frame: i32,
 }
@@ -258,8 +260,16 @@ impl<'a> FuncSel<'a> {
             .map(|d| d + 1)
             .max()
             .unwrap_or(0);
-        let frame = align_to(n_values as i32 * 8, 16);
-        Self { func, frame }
+        // The frame: spill slots first, then one 8-byte slot per local. Every
+        // slot is 8 bytes so an `int` local holds its canonical sign-extended
+        // form, like any other value.
+        let frame = align_to((n_values as i32 + func.slots.len() as i32) * 8, 16);
+        Self { func, n_values, frame }
+    }
+
+    /// The byte displacement of local stack slot `$s`, below the spill area.
+    fn local(&self, s: SlotId) -> i32 {
+        -8 * (self.n_values as i32 + s.0 as i32 + 1)
     }
 
     fn select(&self) -> Result<Vec<MInst>> {
@@ -282,7 +292,7 @@ impl<'a> FuncSel<'a> {
     fn load(&self, v: &Value, reg: Gpr, code: &mut Vec<MInst>) -> Result<()> {
         match v {
             Value::Const(c) => code.push(MInst::MovRImm { dst: reg, imm: *c }),
-            Value::Reg(n) => code.push(MInst::Load { dst: reg, disp: slot(*n) }),
+            Value::Reg(n) => code.push(MInst::Load { dst: reg, disp: spill(*n) }),
             Value::FConst(_) => {
                 return Err(
                     self.err("floating-point operands are not yet supported in codegen (TBD)")
@@ -351,7 +361,7 @@ impl<'a> FuncSel<'a> {
                         )));
                     }
                 };
-                code.push(MInst::Store { disp: slot(*dst), src: result });
+                code.push(MInst::Store { disp: spill(*dst), src: result });
                 Ok(())
             }
             // Compare operands in rax/rcx, materialize the 0/1 result: the flag
@@ -362,7 +372,19 @@ impl<'a> FuncSel<'a> {
                 code.push(MInst::Alu { op: AluOp::Cmp, dst: Gpr::Rax, src: Gpr::Rcx });
                 code.push(MInst::SetCC { cc: cc_of(*pred), dst: Gpr::Rax });
                 code.push(MInst::Movzx8 { dst: Gpr::Rax });
-                code.push(MInst::Store { disp: slot(*dst), src: Gpr::Rax });
+                code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
+                Ok(())
+            }
+            // A local read: copy the stack slot to the value's spill via rax.
+            InstKind::Load { dst, slot, .. } => {
+                code.push(MInst::Load { dst: Gpr::Rax, disp: self.local(*slot) });
+                code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
+                Ok(())
+            }
+            // A local write: the value reaches the stack slot via rax.
+            InstKind::Store { slot, val, .. } => {
+                self.load(val, Gpr::Rax, code)?;
+                code.push(MInst::Store { disp: self.local(*slot), src: Gpr::Rax });
                 Ok(())
             }
         }

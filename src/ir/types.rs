@@ -49,6 +49,11 @@ pub enum Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(pub u32);
 
+/// A local's stack slot in the memory form (MIR-STR-4): an index into its
+/// function's slot table. `mem2reg` later promotes unescaped slots to SSA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotId(pub u32);
+
 /// Integer binary operators (ME-5). The full set is defined; only
 /// `Add`/`Sub`/`Mul`/`SDiv`/`SRem` are produced by lowering in v1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,14 +116,17 @@ impl Inst {
     /// the frame without matching each kind.
     pub fn dst(&self) -> Option<u32> {
         match &self.kind {
-            InstKind::IBin { dst, .. } | InstKind::ICmp { dst, .. } => Some(*dst),
+            InstKind::IBin { dst, .. }
+            | InstKind::ICmp { dst, .. }
+            | InstKind::Load { dst, .. } => Some(*dst),
+            InstKind::Store { .. } => None,
         }
     }
 }
 
 #[derive(Debug)]
 pub enum InstKind {
-    /// `%dst = <op> <ty> lhs, rhs`
+    // `%dst = <op> <ty> lhs, rhs`
     IBin {
         dst: u32,
         op: IBinOp,
@@ -127,9 +135,13 @@ pub enum InstKind {
         ty: Type,
         flags: UbFlags,
     },
-    /// `%dst = icmp <pred> <ty> lhs, rhs` — `ty` is the operand type; the result
-    /// is a 0/1 `int`.
+    // `%dst = icmp <pred> <ty> lhs, rhs` — `ty` is the operand type; the
+    // result is a 0/1 `int`.
     ICmp { dst: u32, pred: IPred, lhs: Value, rhs: Value, ty: Type },
+    // `%dst = load <ty> $slot` — read a stack slot (MIR-STR-4 memory form).
+    Load { dst: u32, slot: SlotId, ty: Type },
+    // `store <ty> val, $slot` — write a stack slot; defines no register.
+    Store { slot: SlotId, val: Value, ty: Type },
 }
 
 /// A basic block's exit. Defined as an enum so `Br`/`CondBr`/`Switch` slot in
@@ -153,6 +165,8 @@ pub struct Function {
     pub name: String,
     pub params: Vec<Type>,
     pub ret_ty: Type,
+    // the stack-slot table: one entry (the slot's type) per local (MIR-STR-4)
+    pub slots: Vec<Type>,
     pub blocks: Vec<Block>,
 }
 
@@ -194,6 +208,9 @@ impl fmt::Display for Function {
             write!(f, "{p}")?;
         }
         writeln!(f, ") -> {} {{", self.ret_ty)?;
+        for (i, ty) in self.slots.iter().enumerate() {
+            writeln!(f, "    ${i}: {ty}")?;
+        }
         for block in &self.blocks {
             writeln!(f, "{block}")?;
         }
@@ -214,6 +231,12 @@ impl fmt::Display for Block {
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "bb{}", self.0)
+    }
+}
+
+impl fmt::Display for SlotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "${}", self.0)
     }
 }
 
@@ -288,6 +311,8 @@ impl fmt::Display for InstKind {
             InstKind::ICmp { dst, pred, lhs, rhs, ty } => {
                 write!(f, "%{dst} = icmp {pred} {ty} {lhs}, {rhs}")
             }
+            InstKind::Load { dst, slot, ty } => write!(f, "%{dst} = load {ty} {slot}"),
+            InstKind::Store { slot, val, ty } => write!(f, "store {ty} {val}, {slot}"),
         }
     }
 }

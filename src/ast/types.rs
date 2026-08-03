@@ -162,6 +162,11 @@ pub enum StmtKind {
     Compound(Vec<Stmt>),
     Return(Option<Expr>),
     If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
+    // `ty name [= init];` — one declarator per declaration in this subset
+    // (FE-16's declarator lists widen this to a `Vec` later).
+    Decl { ty: CType, name: String, init: Option<Expr> },
+    // an expression evaluated for its side effects (`x = 5;`)
+    Expr(Expr),
     Empty,
 }
 
@@ -179,8 +184,13 @@ pub enum ExprKind {
     // The literal's own type (from its suffix) rides along in `ty`; the outer
     // `Expr.ty` slot is sema's annotation (identical here, distinct in general).
     IntLit { value: u64, ty: CType },
+    // a use of a declared name; sema checks that it resolves
+    Ident { name: String },
     Unary { op: UnOp, expr: Box<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    // simple assignment `lhs = rhs`; compound assignment stays a surface node
+    // of its own when it lands (HIR-EXP-3 desugars once, not the parser).
+    Assign { lhs: Box<Expr>, rhs: Box<Expr> },
 }
 
 /// Binary operators (FE-19). The full set is defined; only `+ - * / %` are

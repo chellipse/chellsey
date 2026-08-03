@@ -5,9 +5,10 @@
 //! errors; the driver reports them as internal errors.
 //!
 //! Checked so far: block ids match their position, every branch target is a
-//! real block, every register is assigned exactly once (SSA), and no register
-//! is used without a definition. Full dominance (a use is dominated by its def)
-//! needs a dominator tree and is left for when value-carrying joins arrive.
+//! real block, every register is assigned exactly once (SSA), no register is
+//! used without a definition, and every load/store touches a slot the function
+//! declared. Full dominance (a use is dominated by its def) needs a dominator
+//! tree and is left for when value-carrying joins arrive.
 
 use std::collections::HashSet;
 
@@ -46,6 +47,11 @@ fn verify_fn(func: &Function) -> Result<(), String> {
             for v in inst_uses(&inst.kind) {
                 check_use(v, &defined)?;
             }
+            if let Some(s) = inst_slot(&inst.kind)
+                && s.0 as usize >= func.slots.len()
+            {
+                return Err(format!("access to nonexistent stack slot {s}"));
+            }
         }
         for bb in term_targets(&block.term) {
             if bb.0 as usize >= n {
@@ -71,6 +77,16 @@ fn check_use(v: &Value, defined: &HashSet<u32>) -> Result<(), String> {
 fn inst_uses(kind: &InstKind) -> Vec<&Value> {
     match kind {
         InstKind::IBin { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => vec![lhs, rhs],
+        InstKind::Load { .. } => vec![],
+        InstKind::Store { val, .. } => vec![val],
+    }
+}
+
+// The stack slot an instruction touches, if any. Exhaustive for the same reason.
+fn inst_slot(kind: &InstKind) -> Option<SlotId> {
+    match kind {
+        InstKind::Load { slot, .. } | InstKind::Store { slot, .. } => Some(*slot),
+        InstKind::IBin { .. } | InstKind::ICmp { .. } => None,
     }
 }
 
@@ -107,8 +123,8 @@ mod tests {
         Inst { kind, span: Span { start: 0, end: 0, src: 0 } }
     }
 
-    fn func(blocks: Vec<Block>) -> Program {
-        let f = Function { name: "f".into(), params: vec![], ret_ty: Type::I32, blocks };
+    fn func(slots: Vec<Type>, blocks: Vec<Block>) -> Program {
+        let f = Function { name: "f".into(), params: vec![], ret_ty: Type::I32, slots, blocks };
         Program { funcs: vec![f], data: vec![] }
     }
 
@@ -119,14 +135,14 @@ mod tests {
             insts: vec![ibin(0, Value::Const(1), Value::Const(2))],
             term: Terminator::Ret(Some(Value::Reg(0))),
         };
-        assert!(verify(&func(vec![block])).is_ok());
+        assert!(verify(&func(vec![], vec![block])).is_ok());
     }
 
     #[test]
     fn rejects_dangling_branch_target() {
         let block =
             Block { id: BlockId(0), insts: vec![], term: Terminator::Br(BlockId(7)) };
-        assert!(verify(&func(vec![block])).is_err());
+        assert!(verify(&func(vec![], vec![block])).is_err());
     }
 
     #[test]
@@ -136,7 +152,7 @@ mod tests {
             insts: vec![],
             term: Terminator::Ret(Some(Value::Reg(3))),
         };
-        assert!(verify(&func(vec![block])).is_err());
+        assert!(verify(&func(vec![], vec![block])).is_err());
     }
 
     #[test]
@@ -149,6 +165,31 @@ mod tests {
             ],
             term: Terminator::Ret(None),
         };
-        assert!(verify(&func(vec![block])).is_err());
+        assert!(verify(&func(vec![], vec![block])).is_err());
+    }
+
+    #[test]
+    fn accepts_slot_load_store() {
+        let span = Span { start: 0, end: 0, src: 0 };
+        let insts = vec![
+            Inst {
+                kind: InstKind::Store { slot: SlotId(0), val: Value::Const(7), ty: Type::I32 },
+                span: span.clone(),
+            },
+            Inst { kind: InstKind::Load { dst: 0, slot: SlotId(0), ty: Type::I32 }, span },
+        ];
+        let block =
+            Block { id: BlockId(0), insts, term: Terminator::Ret(Some(Value::Reg(0))) };
+        assert!(verify(&func(vec![Type::I32], vec![block])).is_ok());
+    }
+
+    #[test]
+    fn rejects_out_of_range_slot() {
+        let inst = Inst {
+            kind: InstKind::Store { slot: SlotId(1), val: Value::Const(7), ty: Type::I32 },
+            span: Span { start: 0, end: 0, src: 0 },
+        };
+        let block = Block { id: BlockId(0), insts: vec![inst], term: Terminator::Ret(None) };
+        assert!(verify(&func(vec![Type::I32], vec![block])).is_err());
     }
 }
