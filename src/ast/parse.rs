@@ -160,8 +160,10 @@ impl Parser {
         Ok(value)
     }
 
-    /// A parameter list. Only `()` and `(void)` are modelled; any real
-    /// parameter is TBD (FE-14). Returns `(params, varargs)`.
+    /// A parameter list: `()`, `(void)`, or comma-separated `type [ident]`
+    /// declarations (the name is optional in a prototype; sema requires it in
+    /// a definition). Varargs `...` and pointer/array declarators are TBD.
+    /// Returns `(params, varargs)`.
     fn parse_params(&mut self) -> Result<(Vec<Param>, bool)> {
         self.consume_expect(TokenKind::Punct(Punct::LParen))?;
 
@@ -179,7 +181,26 @@ impl Parser {
             self.consume(2); // `void` `)`
             return Ok((Vec::new(), false));
         }
-        Err(self.error("function parameters are not yet supported (TBD)"))
+
+        let mut params = Vec::new();
+        loop {
+            if self.at(TokenKind::Punct(Punct::Ellipsis)) {
+                return Err(self.error("variadic functions are not yet supported (TBD)"));
+            }
+            let lo = self.cursor;
+            let ty = self.parse_type_specifiers()?;
+            let name = if matches!(self.peek()?.kind, TokenKind::Ident { .. }) {
+                Some(self.parse_ident()?)
+            } else {
+                None
+            };
+            params.push(Param { ty, name, span: self.spanned(lo) });
+            if !self.eat(TokenKind::Punct(Punct::Comma)) {
+                break;
+            }
+        }
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+        Ok((params, false))
     }
 
     // ----- statements (FE-16 / FE-17) --------------------------------------
@@ -211,7 +232,10 @@ impl Parser {
             return Err(self.error("declarator lists are not yet supported (TBD)"));
         }
         self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
-        Ok(Stmt { kind: StmtKind::Decl { ty, name, init }, span: self.spanned(lo) })
+        Ok(Stmt {
+            kind: StmtKind::Decl { ty, name, init },
+            span: self.spanned(lo),
+        })
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
@@ -330,7 +354,10 @@ impl Parser {
         self.consume_expect(TokenKind::Punct(Punct::RParen))?;
 
         let body = Box::new(self.parse_stmt()?);
-        Ok(Stmt { kind: StmtKind::For { init, cond, step, body }, span: self.spanned(lo) })
+        Ok(Stmt {
+            kind: StmtKind::For { init, cond, step, body },
+            span: self.spanned(lo),
+        })
     }
 
     /// `while ( expr ) stmt`
@@ -388,11 +415,8 @@ impl Parser {
             self.consume_expect(TokenKind::Punct(Punct::Colon))?;
             let els = self.parse_cond()?;
             let span = cond.span.union(&els.span);
-            let kind = ExprKind::Cond {
-                cond: Box::new(cond),
-                then: Box::new(then),
-                els: Box::new(els),
-            };
+            let kind =
+                ExprKind::Cond { cond: Box::new(cond), then: Box::new(then), els: Box::new(els) };
             return Ok(Expr { kind, ty: None, span });
         }
         Ok(cond)

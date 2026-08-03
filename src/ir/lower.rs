@@ -4,7 +4,7 @@ use anyhow::anyhow;
 
 use super::types::*;
 use crate::ast::{
-    BinOp, CType, Expr, ExprKind, ExtDeclKind, Stmt, StmtKind, TranslationUnit, UnOp,
+    BinOp, CType, Expr, ExprKind, ExtDeclKind, Param, Stmt, StmtKind, TranslationUnit, UnOp,
 };
 use crate::diagnostic::{Error, Span};
 use crate::sema::ProgramInfo;
@@ -23,8 +23,8 @@ pub fn lower(unit: &TranslationUnit, info: &ProgramInfo) -> Result<Program> {
     let mut funcs = Vec::new();
     for decl in &unit.decls {
         match &decl.kind {
-            ExtDeclKind::FuncDef { ident, body, .. } => {
-                funcs.push(low.function(ident, body)?);
+            ExtDeclKind::FuncDef { ident, params, body, .. } => {
+                funcs.push(low.function(ident, params, body)?);
             }
             // A prototype contributes a signature (already in `info`) but no code.
             ExtDeclKind::FuncDecl { .. } => {}
@@ -41,16 +41,26 @@ struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
-    fn function(&self, name: &str, body: &Stmt) -> Result<Function> {
+    fn function(&self, name: &str, params: &[Param], body: &Stmt) -> Result<Function> {
         let sig = self
             .info
             .funcs
             .get(name)
             .expect("sema collected every defined function's signature");
-        let params = sig.params.iter().map(ir_ty).collect();
+        let param_tys = sig.params.iter().map(ir_ty).collect();
         let ret_ty = ir_ty(&sig.ret);
 
-        let mut b = FnBuilder::new(name.to_string(), params, ret_ty);
+        let mut b = FnBuilder::new(name.to_string(), param_tys, ret_ty);
+        // Parameters take the first `params.len()` slots (the backend's
+        // prologue relies on this) and are named in the function scope.
+        for p in params {
+            let name = p
+                .name
+                .as_ref()
+                .expect("sema required names in a definition");
+            let slot = b.new_slot(ir_ty(&p.ty));
+            b.scopes[0].insert(name.clone(), slot);
+        }
         b.stmt(body)?;
         // ME-12: `main` falling off the end returns 0.
         if name == "main" {
@@ -192,7 +202,10 @@ impl FnBuilder {
                 self.scopes.last_mut().unwrap().insert(name.clone(), slot);
                 if let Some(init) = init {
                     let v = self.expr(init)?;
-                    self.emit(InstKind::Store { slot, val: v.val, ty: ir_ty(ty) }, &stmt.span);
+                    self.emit(
+                        InstKind::Store { slot, val: v.val, ty: ir_ty(ty) },
+                        &stmt.span,
+                    );
                 }
                 Ok(())
             }
@@ -282,11 +295,7 @@ impl FnBuilder {
                     // an absent controlling expression is always true
                     None => Value::Const(1),
                 };
-                self.set_term(Terminator::CondBr {
-                    cond: c,
-                    then_bb: body_bb,
-                    else_bb: exit_bb,
-                });
+                self.set_term(Terminator::CondBr { cond: c, then_bb: body_bb, else_bb: exit_bb });
 
                 self.switch_to(body_bb);
                 // `continue` runs the step before re-testing (6.8.6.2).
@@ -362,11 +371,17 @@ impl FnBuilder {
             },
             span,
         );
-        self.emit(InstKind::Store { slot, val: Value::Reg(norm), ty: ir_ty(&ty) }, span);
+        self.emit(
+            InstKind::Store { slot, val: Value::Reg(norm), ty: ir_ty(&ty) },
+            span,
+        );
         self.set_term(Terminator::Br(join_bb));
 
         self.switch_to(short_bb);
-        self.emit(InstKind::Store { slot, val: Value::Const(short_val), ty: ir_ty(&ty) }, span);
+        self.emit(
+            InstKind::Store { slot, val: Value::Const(short_val), ty: ir_ty(&ty) },
+            span,
+        );
         self.set_term(Terminator::Br(join_bb));
 
         self.switch_to(join_bb);
@@ -405,12 +420,18 @@ impl FnBuilder {
 
                 self.switch_to(then_bb);
                 let t = self.expr(then)?;
-                self.emit(InstKind::Store { slot, val: t.val, ty: ir_ty(&ty) }, &e.span);
+                self.emit(
+                    InstKind::Store { slot, val: t.val, ty: ir_ty(&ty) },
+                    &e.span,
+                );
                 self.set_term(Terminator::Br(join_bb));
 
                 self.switch_to(else_bb);
                 let v = self.expr(els)?;
-                self.emit(InstKind::Store { slot, val: v.val, ty: ir_ty(&ty) }, &e.span);
+                self.emit(
+                    InstKind::Store { slot, val: v.val, ty: ir_ty(&ty) },
+                    &e.span,
+                );
                 self.set_term(Terminator::Br(join_bb));
 
                 self.switch_to(join_bb);
@@ -423,10 +444,16 @@ impl FnBuilder {
             ExprKind::Assign { lhs, rhs } => {
                 let v = self.expr(rhs)?;
                 let ExprKind::Ident { name } = &lhs.kind else {
-                    return Err(err(&lhs.span, "internal: non-lvalue assignment target past sema"));
+                    return Err(err(
+                        &lhs.span,
+                        "internal: non-lvalue assignment target past sema",
+                    ));
                 };
                 let slot = self.lookup(name);
-                self.emit(InstKind::Store { slot, val: v.val, ty: ir_ty(&ty) }, &e.span);
+                self.emit(
+                    InstKind::Store { slot, val: v.val, ty: ir_ty(&ty) },
+                    &e.span,
+                );
                 Ok(TV { val: v.val, ty })
             }
             ExprKind::Unary { op, expr } => {

@@ -28,7 +28,10 @@ fn main() {
     let sources = SourceManager::new();
     let mut failed = false;
     for path in cli.input.iter() {
-        let out = cli.output.clone().unwrap_or_else(|| path.with_extension("o"));
+        let out = cli
+            .output
+            .clone()
+            .unwrap_or_else(|| path.with_extension("o"));
         if let Err(e) = compile(&sources, path, &out) {
             // A span-carrying error resolves against the source store;
             // anything else (e.g. a failed file open) has no source location.

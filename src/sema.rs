@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 
 use crate::ast::{
-    BinOp, CType, Expr, ExprKind, ExtDecl, ExtDeclKind, Stmt, StmtKind, TranslationUnit, UnOp,
+    BinOp, CType, Expr, ExprKind, ExtDecl, ExtDeclKind, Param, Stmt, StmtKind, TranslationUnit,
+    UnOp,
 };
 use crate::diagnostic::Error;
 
@@ -53,12 +54,14 @@ impl Sema {
             self.collect(decl)?;
         }
         for decl in &mut unit.decls {
-            if let ExtDeclKind::FuncDef { ret, body, .. } = &mut decl.kind {
+            if let ExtDeclKind::FuncDef { ret, params, body, .. } = &mut decl.kind {
                 // `ret` is not touched by the walk, so this split borrow is fine.
                 let ret = ret.clone();
-                // A fresh function scope; parameters will populate it (FE-14).
+                // A fresh function scope, populated by the parameters (6.2.1:
+                // they share the body's outermost scope).
                 self.scopes.clear();
                 self.scopes.push(HashMap::new());
+                self.declare_params(params)?;
                 self.loop_depth = 0;
                 self.check_stmt(body, &ret)?;
             }
@@ -84,6 +87,20 @@ impl Sema {
                 .span
                 .clone()
                 .into_error(anyhow!("only `int` functions are supported (TBD)")));
+        }
+        for p in params {
+            if p.ty != CType::INT {
+                return Err(p
+                    .span
+                    .clone()
+                    .into_error(anyhow!("only `int` parameters are supported (TBD)")));
+            }
+        }
+        // v1 passes every argument in a register (SysV: rdi..r9).
+        if params.len() > 6 {
+            return Err(decl.span.clone().into_error(anyhow!(
+                "more than 6 parameters are not yet supported (TBD)"
+            )));
         }
 
         let param_tys: Vec<CType> = params.iter().map(|p| p.ty.clone()).collect();
@@ -115,6 +132,27 @@ impl Sema {
     }
 
     // ----- pass 2: type annotation + subset legality -----------------------
+
+    /// Enter a definition's parameters into the function scope. A definition
+    /// (unlike a prototype) must name every parameter (6.9.1p5).
+    fn declare_params(&mut self, params: &[Param]) -> Result<()> {
+        for p in params {
+            let Some(name) = &p.name else {
+                return Err(p
+                    .span
+                    .clone()
+                    .into_error(anyhow!("parameter name omitted in a function definition")));
+            };
+            let scope = self.scopes.last_mut().unwrap();
+            if scope.insert(name.clone(), p.ty.clone()).is_some() {
+                return Err(p
+                    .span
+                    .clone()
+                    .into_error(anyhow!("redeclaration of parameter `{name}`")));
+            }
+        }
+        Ok(())
+    }
 
     /// Resolve a name against the scope stack, innermost scope first.
     fn lookup(&self, name: &str) -> Option<&CType> {

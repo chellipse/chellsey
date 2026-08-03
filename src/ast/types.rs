@@ -126,11 +126,9 @@ pub struct ExtDecl {
     pub span: Span,
 }
 
-/// One formal parameter of a function declarator. Nothing in the v1 subset
-/// constructs one yet (parameters are TBD — only `()`/`(void)` parse), but the
-/// FE-14 shape is fixed now so parameter parsing widens rather than reshapes.
+/// One formal parameter of a function declarator. The name is optional in a
+/// prototype (`int f(int);`); sema requires it in a definition.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Param {
     pub ty: CType,
     pub name: Option<String>,
@@ -161,9 +159,16 @@ pub struct Stmt {
 pub enum StmtKind {
     Compound(Vec<Stmt>),
     Return(Option<Expr>),
-    If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
+    If {
+        cond: Expr,
+        then: Box<Stmt>,
+        els: Option<Box<Stmt>>,
+    },
     // structured on purpose (FE-18 / HIR-CF-1): loops are not pre-lowered
-    While { cond: Expr, body: Box<Stmt> },
+    While {
+        cond: Expr,
+        body: Box<Stmt>,
+    },
     // `for (init; cond; step) body` — absent clauses are None; `init` is a
     // declaration or an expression statement; an absent cond is always true.
     For {
@@ -178,7 +183,11 @@ pub enum StmtKind {
     Continue,
     // `ty name [= init];` — one declarator per declaration in this subset
     // (FE-16's declarator lists widen this to a `Vec` later).
-    Decl { ty: CType, name: String, init: Option<Expr> },
+    Decl {
+        ty: CType,
+        name: String,
+        init: Option<Expr>,
+    },
     // an expression evaluated for its side effects (`x = 5;`)
     Expr(Expr),
     Empty,

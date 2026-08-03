@@ -9,8 +9,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 // ----- registers & frame layout (BE-1) -------------------------------------
 
-/// The general-purpose registers this backend touches. The full SysV register
-/// file (rsi/rdi/r8/r9 for argument passing) arrives with the call ABI (BE-8).
+/// The general-purpose registers this backend touches: the scratch/frame set
+/// plus the SysV integer-argument registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gpr {
     Rax,
@@ -18,10 +18,15 @@ enum Gpr {
     Rdx,
     Rsp,
     Rbp,
+    Rsi,
+    Rdi,
+    R8,
+    R9,
 }
 
 impl Gpr {
-    /// The 3-bit register number used in ModRM/opcode encodings.
+    /// The register number used in ModRM/opcode encodings; values >= 8 need a
+    /// REX extension bit, which the encoder adds.
     fn code(self) -> u8 {
         match self {
             Gpr::Rax => 0,
@@ -29,6 +34,10 @@ impl Gpr {
             Gpr::Rdx => 2,
             Gpr::Rsp => 4,
             Gpr::Rbp => 5,
+            Gpr::Rsi => 6,
+            Gpr::Rdi => 7,
+            Gpr::R8 => 8,
+            Gpr::R9 => 9,
         }
     }
 
@@ -39,6 +48,10 @@ impl Gpr {
             Gpr::Rdx => "rdx",
             Gpr::Rsp => "rsp",
             Gpr::Rbp => "rbp",
+            Gpr::Rsi => "rsi",
+            Gpr::Rdi => "rdi",
+            Gpr::R8 => "r8",
+            Gpr::R9 => "r9",
         }
     }
 
@@ -50,9 +63,31 @@ impl Gpr {
             Gpr::Rdx => "dl",
             Gpr::Rsp => "spl",
             Gpr::Rbp => "bpl",
+            Gpr::Rsi => "sil",
+            Gpr::Rdi => "dil",
+            Gpr::R8 => "r8b",
+            Gpr::R9 => "r9b",
+        }
+    }
+
+    /// The 32-bit register name, for `movsxd` textual output.
+    fn name32(self) -> &'static str {
+        match self {
+            Gpr::Rax => "eax",
+            Gpr::Rcx => "ecx",
+            Gpr::Rdx => "edx",
+            Gpr::Rsp => "esp",
+            Gpr::Rbp => "ebp",
+            Gpr::Rsi => "esi",
+            Gpr::Rdi => "edi",
+            Gpr::R8 => "r8d",
+            Gpr::R9 => "r9d",
         }
     }
 }
+
+/// The SysV integer-argument registers, in order.
+const ARG_REGS: [Gpr; 6] = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
 
 /// The byte displacement of SSA value `%v`'s spill slot: `[rbp - 8*(v+1)]`
 /// (§2.1 spill-everything: one fixed 8-byte slot per value).
@@ -228,6 +263,8 @@ enum MInst {
     SetCC { cc: Cc, dst: Gpr },
     // `movzx dst, dst_l` (0F B6 /r) — zero-extend `dst`'s low byte into `dst`.
     Movzx8 { dst: Gpr },
+    // `movsxd dst, src_32` (63 /r) — sign-extend `src`'s low dword into `dst`.
+    Movsxd { dst: Gpr, src: Gpr },
     // A basic-block label (zero bytes); records its offset for jump fixups.
     Label(u32),
     // jmp rel32 to a block label.
@@ -276,6 +313,15 @@ impl<'a> FuncSel<'a> {
         let mut code = vec![MInst::PushRbp, MInst::MovRbpRsp];
         if self.frame > 0 {
             code.push(MInst::SubRspImm(self.frame));
+        }
+        // Spill the incoming arguments (SysV: rdi..r9) to their parameter
+        // slots, sign-extending from 32 bits: the upper halves of argument
+        // registers are unspecified at entry, and the slots must hold the
+        // canonical sign-extended form like every other value.
+        for (i, _) in self.func.params.iter().enumerate() {
+            let reg = ARG_REGS[i];
+            code.push(MInst::Movsxd { dst: reg, src: reg });
+            code.push(MInst::Store { disp: self.local(SlotId(i as u32)), src: reg });
         }
         for block in &self.func.blocks {
             code.push(MInst::Label(block.id.0));
@@ -557,6 +603,12 @@ impl Encoder {
                 self.b(0xB6);
                 self.modrm(0b11, dst.code(), dst.code());
             }
+            MInst::Movsxd { dst, src } => {
+                // movsxd r64, r/m32 : 48 63 /r, reg=dst, rm=src
+                self.rex_w(dst.code(), src.code());
+                self.b(0x63);
+                self.modrm(0b11, dst.code(), src.code());
+            }
             MInst::Label(n) => {
                 let n = n as usize;
                 if n >= self.labels.len() {
@@ -616,6 +668,7 @@ fn asm(inst: MInst) -> String {
         MInst::Shift { op, dst } => format!("{} {}, cl", op.name(), dst.name()),
         MInst::SetCC { cc, dst } => format!("set{} {}", cc.name(), dst.name8()),
         MInst::Movzx8 { dst } => format!("movzx {}, {}", dst.name(), dst.name8()),
+        MInst::Movsxd { dst, src } => format!("movsxd {}, {}", dst.name(), src.name32()),
         MInst::Label(n) => format!("bb{n}:"),
         MInst::Jmp(n) => format!("jmp bb{n}"),
         MInst::JmpCC { cc, target } => format!("j{} bb{target}", cc.name()),

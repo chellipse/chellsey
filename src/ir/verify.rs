@@ -25,6 +25,15 @@ fn verify_fn(func: &Function) -> Result<(), String> {
     if func.blocks.is_empty() {
         return Err("function has no blocks".into());
     }
+    // Parameters live in the first `params.len()` stack slots (the backend's
+    // prologue spills the argument registers there).
+    if func.slots.len() < func.params.len() {
+        return Err(format!(
+            "{} parameters but only {} stack slots",
+            func.params.len(),
+            func.slots.len()
+        ));
+    }
 
     // SSA: each register is defined by exactly one instruction.
     let mut defined = HashSet::new();
@@ -124,7 +133,13 @@ mod tests {
     }
 
     fn func(slots: Vec<Type>, blocks: Vec<Block>) -> Program {
-        let f = Function { name: "f".into(), params: vec![], ret_ty: Type::I32, slots, blocks };
+        let f = Function {
+            name: "f".into(),
+            params: vec![],
+            ret_ty: Type::I32,
+            slots,
+            blocks,
+        };
         Program { funcs: vec![f], data: vec![] }
     }
 
@@ -140,8 +155,11 @@ mod tests {
 
     #[test]
     fn rejects_dangling_branch_target() {
-        let block =
-            Block { id: BlockId(0), insts: vec![], term: Terminator::Br(BlockId(7)) };
+        let block = Block {
+            id: BlockId(0),
+            insts: vec![],
+            term: Terminator::Br(BlockId(7)),
+        };
         assert!(verify(&func(vec![], vec![block])).is_err());
     }
 
@@ -176,10 +194,16 @@ mod tests {
                 kind: InstKind::Store { slot: SlotId(0), val: Value::Const(7), ty: Type::I32 },
                 span: span.clone(),
             },
-            Inst { kind: InstKind::Load { dst: 0, slot: SlotId(0), ty: Type::I32 }, span },
+            Inst {
+                kind: InstKind::Load { dst: 0, slot: SlotId(0), ty: Type::I32 },
+                span,
+            },
         ];
-        let block =
-            Block { id: BlockId(0), insts, term: Terminator::Ret(Some(Value::Reg(0))) };
+        let block = Block {
+            id: BlockId(0),
+            insts,
+            term: Terminator::Ret(Some(Value::Reg(0))),
+        };
         assert!(verify(&func(vec![Type::I32], vec![block])).is_ok());
     }
 

@@ -137,11 +137,25 @@ pub enum InstKind {
     },
     // `%dst = icmp <pred> <ty> lhs, rhs` — `ty` is the operand type; the
     // result is a 0/1 `int`.
-    ICmp { dst: u32, pred: IPred, lhs: Value, rhs: Value, ty: Type },
+    ICmp {
+        dst: u32,
+        pred: IPred,
+        lhs: Value,
+        rhs: Value,
+        ty: Type,
+    },
     // `%dst = load <ty> $slot` — read a stack slot (MIR-STR-4 memory form).
-    Load { dst: u32, slot: SlotId, ty: Type },
+    Load {
+        dst: u32,
+        slot: SlotId,
+        ty: Type,
+    },
     // `store <ty> val, $slot` — write a stack slot; defines no register.
-    Store { slot: SlotId, val: Value, ty: Type },
+    Store {
+        slot: SlotId,
+        val: Value,
+        ty: Type,
+    },
 }
 
 /// A basic block's exit. Defined as an enum so `Br`/`CondBr`/`Switch` slot in
