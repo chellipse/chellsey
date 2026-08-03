@@ -322,6 +322,18 @@ impl Sema {
                 // in the all-`int` subset)
                 lhs.ty.clone().expect("just annotated")
             }
+            ExprKind::CompoundAssign { lhs, rhs, .. } => {
+                // The same modifiable-lvalue rule as `=` (6.5.16.2); every
+                // compound operator is valid on the all-`int` operands here, so
+                // there is nothing further to constrain per operator.
+                if !matches!(lhs.kind, ExprKind::Ident { .. }) {
+                    return Err(span
+                        .into_error(anyhow!("left operand of compound assignment is not assignable")));
+                }
+                self.check_expr(lhs)?;
+                self.check_expr(rhs)?;
+                lhs.ty.clone().expect("just annotated")
+            }
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {

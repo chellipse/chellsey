@@ -386,9 +386,10 @@ impl Parser {
         Ok(expr)
     }
 
-    /// `parse_assign` — simple assignment, right-associative (`x = y = 5`).
-    /// The lvalue check on the left operand is sema's (6.5.16); compound
-    /// assignment (`+=` ...) is a distinct surface node later and TBD here.
+    /// `parse_assign` — assignment, right-associative (`x = y = 5`). The lvalue
+    /// check on the left operand is sema's (6.5.16). Compound assignment is its
+    /// own surface node carrying the underlying binary operator; sema and
+    /// lowering read `x op= y` as `x = x op y` with `x` evaluated once.
     fn parse_assign(&mut self) -> Result<Expr> {
         let lhs = self.parse_cond()?;
         if self.eat(TokenKind::Punct(Punct::Eq)) {
@@ -397,10 +398,12 @@ impl Parser {
             let kind = ExprKind::Assign { lhs: Box::new(lhs), rhs: Box::new(rhs) };
             return Ok(Expr { kind, ty: None, span });
         }
-        if let Ok(tok) = self.peek()
-            && is_assign_op(&tok.kind)
-        {
-            return Err(self.error("compound assignment is not yet supported (TBD)"));
+        if let Some(op) = self.peek().ok().and_then(|tok| compound_assign_op(&tok.kind)) {
+            self.consume(1);
+            let rhs = self.parse_assign()?;
+            let span = lhs.span.union(&rhs.span);
+            let kind = ExprKind::CompoundAssign { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            return Ok(Expr { kind, ty: None, span });
         }
         Ok(lhs)
     }
@@ -600,24 +603,26 @@ fn bin_op(kind: &TokenKind) -> Option<(BinOp, u8)> {
     Some(pair)
 }
 
-/// Whether a punctuator is a (compound-)assignment operator.
-fn is_assign_op(kind: &TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Punct(
-            Punct::Eq
-                | Punct::PlusEq
-                | Punct::MinusEq
-                | Punct::StarEq
-                | Punct::SlashEq
-                | Punct::PercentEq
-                | Punct::LtLtEq
-                | Punct::GtGtEq
-                | Punct::AmpEq
-                | Punct::CaretEq
-                | Punct::PipeEq
-        )
-    )
+/// The underlying binary operator of a compound-assignment punctuator
+/// (`+=` → `Add`, `<<=` → `Shl`, ...), or `None` for any other token. Simple
+/// `=` is not a compound assignment and is matched separately.
+fn compound_assign_op(kind: &TokenKind) -> Option<BinOp> {
+    let TokenKind::Punct(p) = kind else {
+        return None;
+    };
+    Some(match p {
+        Punct::PlusEq => BinOp::Add,
+        Punct::MinusEq => BinOp::Sub,
+        Punct::StarEq => BinOp::Mul,
+        Punct::SlashEq => BinOp::Div,
+        Punct::PercentEq => BinOp::Rem,
+        Punct::LtLtEq => BinOp::Shl,
+        Punct::GtGtEq => BinOp::Shr,
+        Punct::AmpEq => BinOp::BitAnd,
+        Punct::CaretEq => BinOp::BitXor,
+        Punct::PipeEq => BinOp::BitOr,
+        _ => return None,
+    })
 }
 
 /// A keyword that begins a type specifier (used to detect declarations and to

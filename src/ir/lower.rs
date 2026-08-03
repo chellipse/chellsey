@@ -456,6 +456,38 @@ impl FnBuilder {
                 );
                 Ok(TV { val: v.val, ty })
             }
+            // `lhs op= rhs` (6.5.16.2): load the lvalue once, combine it with
+            // the rhs under `op`, store the result back, and yield it. `lhs` is
+            // an ident here, so "evaluate the lvalue once" is one slot lookup.
+            ExprKind::CompoundAssign { op, lhs, rhs } => {
+                let ExprKind::Ident { name } = &lhs.kind else {
+                    return Err(err(
+                        &lhs.span,
+                        "internal: non-lvalue compound-assignment target past sema",
+                    ));
+                };
+                let slot = self.lookup(name);
+                let cur = self.new_reg();
+                self.emit(InstKind::Load { dst: cur, slot, ty: ir_ty(&ty) }, &e.span);
+                let r = self.expr(rhs)?;
+                let dst = self.new_reg();
+                self.emit(
+                    InstKind::IBin {
+                        dst,
+                        op: ibin_op(*op).expect("a compound-assignment operator is arithmetic"),
+                        lhs: Value::Reg(cur),
+                        rhs: r.val,
+                        ty: ir_ty(&ty),
+                        flags: UbFlags::default(),
+                    },
+                    &e.span,
+                );
+                self.emit(
+                    InstKind::Store { slot, val: Value::Reg(dst), ty: ir_ty(&ty) },
+                    &e.span,
+                );
+                Ok(TV { val: Value::Reg(dst), ty })
+            }
             // `f(args)`: evaluate every argument (left to right), then call.
             // All arguments are computed before the call, so a nested call in
             // one argument can't clobber another — each has its own slot.
@@ -545,20 +577,7 @@ impl FnBuilder {
                     return Ok(TV { val: Value::Reg(dst), ty });
                 }
                 // Operands are signed `int` in this subset, so the signed ops.
-                let ir_op = match op {
-                    BinOp::Add => IBinOp::Add,
-                    BinOp::Sub => IBinOp::Sub,
-                    BinOp::Mul => IBinOp::Mul,
-                    BinOp::Div => IBinOp::SDiv,
-                    BinOp::Rem => IBinOp::SRem,
-                    BinOp::BitAnd => IBinOp::And,
-                    BinOp::BitOr => IBinOp::Or,
-                    BinOp::BitXor => IBinOp::Xor,
-                    BinOp::Shl => IBinOp::Shl,
-                    // `int` is signed, so `>>` is an arithmetic shift.
-                    BinOp::Shr => IBinOp::AShr,
-                    _ => unreachable!("comparisons and short-circuits are handled above"),
-                };
+                let ir_op = ibin_op(*op).expect("comparisons and short-circuits are handled above");
                 let dst = self.new_reg();
                 self.emit(
                     InstKind::IBin {
@@ -590,6 +609,26 @@ fn ir_ty(ct: &CType) -> Type {
         // arrays decay to a pointer; neither is lowered further yet (ME-8).
         CType::Ptr(_) | CType::Array(..) => Type::Ptr,
     }
+}
+
+/// The IR integer-arithmetic opcode for an arithmetic/bitwise/shift operator,
+/// or `None` for the relational/equality/short-circuit operators (those lower
+/// to an `icmp` or to control flow, never an `IBin`). Operands are signed `int`
+/// in this subset, so division and `>>` map to the signed opcodes.
+fn ibin_op(op: BinOp) -> Option<IBinOp> {
+    Some(match op {
+        BinOp::Add => IBinOp::Add,
+        BinOp::Sub => IBinOp::Sub,
+        BinOp::Mul => IBinOp::Mul,
+        BinOp::Div => IBinOp::SDiv,
+        BinOp::Rem => IBinOp::SRem,
+        BinOp::BitAnd => IBinOp::And,
+        BinOp::BitOr => IBinOp::Or,
+        BinOp::BitXor => IBinOp::Xor,
+        BinOp::Shl => IBinOp::Shl,
+        BinOp::Shr => IBinOp::AShr,
+        _ => return None,
+    })
 }
 
 /// The signed integer comparison predicate for a relational/equality operator,

@@ -214,6 +214,10 @@ pub enum ExprKind {
     // simple assignment `lhs = rhs`; compound assignment stays a surface node
     // of its own when it lands (HIR-EXP-3 desugars once, not the parser).
     Assign { lhs: Box<Expr>, rhs: Box<Expr> },
+    // `lhs op= rhs` — modify-in-place carrying the underlying binary operator
+    // `op` (6.5.16.2). Lowering desugars it to a load-op-store on the lvalue's
+    // slot, with `lhs` evaluated once.
+    CompoundAssign { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     // `cond ? then : els` — only the taken arm evaluates (6.5.15)
     Cond { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
     // `callee(args)` — a direct call to a named function (6.5.2.2); calls
