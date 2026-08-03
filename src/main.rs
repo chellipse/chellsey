@@ -14,14 +14,22 @@ use diagnostic::SourceManager;
 #[derive(Debug, Parser)]
 struct Cli {
     input: Vec<PathBuf>,
+    // Object output path; defaults to `<input>.o`. Only valid with one input.
+    #[arg(short = 'o')]
+    output: Option<PathBuf>,
 }
 
 fn main() {
     let cli = Cli::parse();
+    if cli.output.is_some() && cli.input.len() > 1 {
+        eprintln!("error: -o cannot be given with multiple input files");
+        std::process::exit(1);
+    }
     let sources = SourceManager::new();
     let mut failed = false;
     for path in cli.input.iter() {
-        if let Err(e) = compile(&sources, path) {
+        let out = cli.output.clone().unwrap_or_else(|| path.with_extension("o"));
+        if let Err(e) = compile(&sources, path, &out) {
             // A span-carrying error resolves against the source store;
             // anything else (e.g. a failed file open) has no source location.
             match e.downcast_ref::<diagnostic::Error>() {
@@ -36,7 +44,7 @@ fn main() {
     }
 }
 
-fn compile(sources: &SourceManager, path: &Path) -> anyhow::Result<()> {
+fn compile(sources: &SourceManager, path: &Path, out: &Path) -> anyhow::Result<()> {
     let tokens = lexer::Lexer::new(sources).lex(path)?;
     println!("Tokens: {:?}", &tokens);
 
@@ -56,8 +64,7 @@ fn compile(sources: &SourceManager, path: &Path) -> anyhow::Result<()> {
     println!("ASM:\n{}", codegen::assembly(&ir)?);
 
     let obj = codegen::emit_object(&ir)?;
-    let out = path.with_extension("o");
-    std::fs::write(&out, obj)?;
+    std::fs::write(out, obj)?;
     println!("wrote {}", out.display());
 
     Ok(())
