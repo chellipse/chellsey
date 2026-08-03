@@ -256,6 +256,48 @@ impl FnBuilder {
                 self.switch_to(exit_bb);
                 Ok(())
             }
+            StmtKind::For { init, cond, step, body } => {
+                // The for-clause scope (6.8.5.3): an init declaration is
+                // visible in cond, step, and body, and dies at the loop's end.
+                self.scopes.push(HashMap::new());
+                if let Some(init) = init {
+                    self.stmt(init)?;
+                }
+                let cond_bb = self.new_block();
+                let body_bb = self.new_block();
+                let step_bb = self.new_block();
+                let exit_bb = self.new_block();
+                self.set_term(Terminator::Br(cond_bb));
+
+                self.switch_to(cond_bb);
+                let c = match cond {
+                    Some(cond) => self.expr(cond)?.val,
+                    // an absent controlling expression is always true
+                    None => Value::Const(1),
+                };
+                self.set_term(Terminator::CondBr {
+                    cond: c,
+                    then_bb: body_bb,
+                    else_bb: exit_bb,
+                });
+
+                self.switch_to(body_bb);
+                self.stmt(body)?;
+                if !self.terminated {
+                    self.set_term(Terminator::Br(step_bb));
+                }
+
+                // A separate step block so `continue` has its target (FE-18).
+                self.switch_to(step_bb);
+                if let Some(step) = step {
+                    self.expr(step)?;
+                }
+                self.set_term(Terminator::Br(cond_bb)); // the back edge
+
+                self.switch_to(exit_bb);
+                self.scopes.pop();
+                Ok(())
+            }
             StmtKind::Empty => Ok(()),
         }
     }

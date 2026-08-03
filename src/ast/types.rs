@@ -164,6 +164,14 @@ pub enum StmtKind {
     If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
     // structured on purpose (FE-18 / HIR-CF-1): loops are not pre-lowered
     While { cond: Expr, body: Box<Stmt> },
+    // `for (init; cond; step) body` — absent clauses are None; `init` is a
+    // declaration or an expression statement; an absent cond is always true.
+    For {
+        init: Option<Box<Stmt>>,
+        cond: Option<Expr>,
+        step: Option<Expr>,
+        body: Box<Stmt>,
+    },
     // `ty name [= init];` — one declarator per declaration in this subset
     // (FE-16's declarator lists widen this to a `Vec` later).
     Decl { ty: CType, name: String, init: Option<Expr> },

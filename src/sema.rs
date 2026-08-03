@@ -163,6 +163,23 @@ impl Sema {
                 self.check_expr(cond)?;
                 self.check_stmt(body, ret)
             }
+            StmtKind::For { init, cond, step, body } => {
+                // The for clause opens a scope enclosing cond, step, and body
+                // (6.8.5.3); the body's own block still nests inside it.
+                self.scopes.push(HashMap::new());
+                if let Some(init) = init {
+                    self.check_stmt(init, ret)?;
+                }
+                if let Some(cond) = cond {
+                    self.check_expr(cond)?;
+                }
+                if let Some(step) = step {
+                    self.check_expr(step)?;
+                }
+                self.check_stmt(body, ret)?;
+                self.scopes.pop();
+                Ok(())
+            }
             StmtKind::Return(Some(expr)) => self.check_expr(expr),
             StmtKind::Return(None) => {
                 // Every modelled function returns `int`, so a bare `return;` has

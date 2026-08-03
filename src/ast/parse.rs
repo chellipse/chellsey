@@ -235,8 +235,9 @@ impl Parser {
             TokenKind::Punct(Punct::LBrace) => return self.parse_comp_stmt(),
             TokenKind::Kw(Kw::_if) => return self.parse_if(),
             TokenKind::Kw(Kw::_while) => return self.parse_while(),
-            TokenKind::Kw(Kw::_do | Kw::_for) => {
-                return Err(self.error("this loop form is not yet supported (TBD)"));
+            TokenKind::Kw(Kw::_for) => return self.parse_for(),
+            TokenKind::Kw(Kw::_do) => {
+                return Err(self.error("`do`/`while` loops are not yet supported (TBD)"));
             }
             TokenKind::Kw(Kw::_break | Kw::_continue) => {
                 return Err(self.error("`break`/`continue` are not yet supported (TBD)"));
@@ -286,6 +287,43 @@ impl Parser {
             None
         };
         Ok(Stmt { kind: StmtKind::If { cond, then, els }, span: self.spanned(lo) })
+    }
+
+    /// `for ( init ; cond ; step ) stmt` — each clause may be empty; `init`
+    /// may also be a declaration (6.8.5.3), whose scope is the whole loop.
+    fn parse_for(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
+        self.consume(1); // `for`
+        self.consume_expect(TokenKind::Punct(Punct::LParen))?;
+
+        let init = if self.eat(TokenKind::Punct(Punct::SemiColon)) {
+            None
+        } else if is_type_start(&self.peek()?.kind) {
+            // a declaration consumes its own `;`
+            Some(Box::new(self.parse_decl()?))
+        } else {
+            let expr = self.parse_expr()?;
+            self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+            let span = expr.span.clone();
+            Some(Box::new(Stmt { kind: StmtKind::Expr(expr), span }))
+        };
+
+        let cond = if self.at(TokenKind::Punct(Punct::SemiColon)) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+
+        let step = if self.at(TokenKind::Punct(Punct::RParen)) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+
+        let body = Box::new(self.parse_stmt()?);
+        Ok(Stmt { kind: StmtKind::For { init, cond, step, body }, span: self.spanned(lo) })
     }
 
     /// `while ( expr ) stmt`
