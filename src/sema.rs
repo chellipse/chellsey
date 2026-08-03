@@ -277,11 +277,8 @@ impl Sema {
                     BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
                         CType::INT
                     }
-                    _ => {
-                        return Err(
-                            span.into_error(anyhow!("this operator is not yet supported (TBD)"))
-                        );
-                    }
+                    // short-circuit operators also yield a 0/1 `int` (6.5.13/14)
+                    BinOp::LogAnd | BinOp::LogOr => CType::INT,
                 }
             }
         };

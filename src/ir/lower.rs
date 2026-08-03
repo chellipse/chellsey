@@ -322,6 +322,59 @@ impl FnBuilder {
         }
     }
 
+    /// `a && b` / `a || b` (6.5.13/14) through a result slot — the memory-form
+    /// answer to a value crossing a join (no phis, MIR-STR-4): the deciding
+    /// branch stores the known constant, the other evaluates the rhs and
+    /// stores its normalized truth value; the join reloads the slot.
+    fn short_circuit(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        span: &Span,
+        ty: CType,
+    ) -> Result<TV> {
+        let slot = self.new_slot(ir_ty(&ty));
+        let l = self.expr(lhs)?;
+
+        let rhs_bb = self.new_block();
+        let short_bb = self.new_block();
+        let join_bb = self.new_block();
+        // `false && _` is 0 without looking at the rhs; `true || _` is 1.
+        let (then_bb, else_bb, short_val) = match op {
+            BinOp::LogAnd => (rhs_bb, short_bb, 0),
+            BinOp::LogOr => (short_bb, rhs_bb, 1),
+            _ => unreachable!("only the short-circuit operators come here"),
+        };
+        self.set_term(Terminator::CondBr { cond: l.val, then_bb, else_bb });
+
+        self.switch_to(rhs_bb);
+        let r = self.expr(rhs)?;
+        // the result is the rhs's truth value, not the rhs itself
+        let norm = self.new_reg();
+        self.emit(
+            InstKind::ICmp {
+                dst: norm,
+                pred: IPred::Ne,
+                lhs: r.val,
+                rhs: Value::Const(0),
+                ty: ir_ty(&r.ty),
+            },
+            span,
+        );
+        self.emit(InstKind::Store { slot, val: Value::Reg(norm), ty: ir_ty(&ty) }, span);
+        self.set_term(Terminator::Br(join_bb));
+
+        self.switch_to(short_bb);
+        self.emit(InstKind::Store { slot, val: Value::Const(short_val), ty: ir_ty(&ty) }, span);
+        self.set_term(Terminator::Br(join_bb));
+
+        self.switch_to(join_bb);
+        let dst = self.new_reg();
+        self.emit(InstKind::Load { dst, slot, ty: ir_ty(&ty) }, span);
+        Ok(TV { val: Value::Reg(dst), ty })
+    }
+
     /// Lower an expression to a typed value, emitting the instructions it needs
     /// into the current block. `TV.ty` is read from sema's annotation.
     fn expr(&mut self, e: &Expr) -> Result<TV> {
@@ -406,6 +459,11 @@ impl FnBuilder {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
+                // `&&`/`||` evaluate the rhs conditionally, so they build CFG
+                // instead of a single instruction — before touching operands.
+                if matches!(op, BinOp::LogAnd | BinOp::LogOr) {
+                    return self.short_circuit(*op, lhs, rhs, &e.span, ty);
+                }
                 let l = self.expr(lhs)?;
                 let r = self.expr(rhs)?;
                 // Relational / equality operators compare the operands and yield
@@ -432,7 +490,7 @@ impl FnBuilder {
                     BinOp::Shl => IBinOp::Shl,
                     // `int` is signed, so `>>` is an arithmetic shift.
                     BinOp::Shr => IBinOp::AShr,
-                    _ => return Err(err(&e.span, "this operator is not yet supported (TBD)")),
+                    _ => unreachable!("comparisons and short-circuits are handled above"),
                 };
                 let dst = self.new_reg();
                 self.emit(
