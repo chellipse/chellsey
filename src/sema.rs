@@ -354,6 +354,12 @@ impl Sema {
                 self.check_expr(inner)?;
                 inner.ty.clone().expect("just annotated")
             }
+            ExprKind::Comma { lhs, rhs } => {
+                // `lhs` is evaluated and discarded; the result is `rhs` (6.5.17).
+                self.check_expr(lhs)?;
+                self.check_expr(rhs)?;
+                rhs.ty.clone().expect("just annotated")
+            }
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {

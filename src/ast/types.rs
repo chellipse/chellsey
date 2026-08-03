@@ -228,6 +228,9 @@ pub enum ExprKind {
     // `inc` is `++` vs `--`. A load-op-store like compound assignment; prefix
     // yields the new value, postfix the old.
     IncDec { pre: bool, inc: bool, expr: Box<Expr> },
+    // `lhs , rhs` (6.5.17): evaluate `lhs` for its side effects and discard
+    // it (a sequence point follows), then the result is `rhs`.
+    Comma { lhs: Box<Expr>, rhs: Box<Expr> },
     // `cond ? then : els` — only the taken arm evaluates (6.5.15)
     Cond { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
     // `callee(args)` — a direct call to a named function (6.5.2.2); calls

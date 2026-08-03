@@ -388,13 +388,19 @@ impl Parser {
     // literals, parentheses, unary minus, and `+ - * / %`. Every other level is
     // a passthrough or a TBD arm, so later batches widen without reshaping.
 
-    /// `parse_expr = comma` — the comma operator is TBD.
+    /// `parse_expr = comma` — the comma operator (6.5.17), left-associative.
+    /// A call's arguments and a declarator's initializer parse at assignment
+    /// precedence, so their `,`s stay separators; only a full-expression
+    /// context (a `for` clause, `return`, an expression statement) folds here.
     fn parse_expr(&mut self) -> Result<Expr> {
-        let expr = self.parse_assign()?;
-        if self.at(TokenKind::Punct(Punct::Comma)) {
-            return Err(self.error("the comma operator is not yet supported (TBD)"));
+        let mut lhs = self.parse_assign()?;
+        while self.eat(TokenKind::Punct(Punct::Comma)) {
+            let rhs = self.parse_assign()?;
+            let span = lhs.span.union(&rhs.span);
+            let kind = ExprKind::Comma { lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr { kind, ty: None, span };
         }
-        Ok(expr)
+        Ok(lhs)
     }
 
     /// `parse_assign` — assignment, right-associative (`x = y = 5`). The lvalue

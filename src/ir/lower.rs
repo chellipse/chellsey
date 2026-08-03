@@ -547,6 +547,12 @@ impl FnBuilder {
                 let val = if *pre { Value::Reg(next) } else { Value::Reg(cur) };
                 Ok(TV { val, ty })
             }
+            // `lhs , rhs` (6.5.17): evaluate the left for its side effects and
+            // discard the value, then the whole expression is the right.
+            ExprKind::Comma { lhs, rhs } => {
+                self.expr(lhs)?;
+                self.expr(rhs)
+            }
             // `f(args)`: evaluate every argument (left to right), then call.
             // All arguments are computed before the call, so a nested call in
             // one argument can't clobber another — each has its own slot.
