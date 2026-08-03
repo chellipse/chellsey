@@ -78,6 +78,9 @@ struct FnBuilder {
     // sema's scope discipline exactly, so a name resolves to the same
     // declaration in both walks; sema already diagnosed the failures.
     scopes: Vec<HashMap<String, SlotId>>,
+    // (continue target, break target) per enclosing loop, innermost last.
+    // Sema already rejected loop jumps outside a loop.
+    loops: Vec<(BlockId, BlockId)>,
 }
 
 impl FnBuilder {
@@ -97,6 +100,7 @@ impl FnBuilder {
             slots: Vec::new(),
             // the function scope; parameters will land here (FE-14)
             scopes: vec![HashMap::new()],
+            loops: Vec::new(),
         }
     }
 
@@ -248,7 +252,10 @@ impl FnBuilder {
                 });
 
                 self.switch_to(body_bb);
+                // `continue` re-tests the condition; `break` leaves the loop.
+                self.loops.push((cond_bb, exit_bb));
                 self.stmt(body)?;
+                self.loops.pop();
                 if !self.terminated {
                     self.set_term(Terminator::Br(cond_bb)); // the back edge
                 }
@@ -282,7 +289,10 @@ impl FnBuilder {
                 });
 
                 self.switch_to(body_bb);
+                // `continue` runs the step before re-testing (6.8.6.2).
+                self.loops.push((step_bb, exit_bb));
                 self.stmt(body)?;
+                self.loops.pop();
                 if !self.terminated {
                     self.set_term(Terminator::Br(step_bb));
                 }
@@ -296,6 +306,16 @@ impl FnBuilder {
 
                 self.switch_to(exit_bb);
                 self.scopes.pop();
+                Ok(())
+            }
+            StmtKind::Break => {
+                let &(_, break_bb) = self.loops.last().expect("sema kept jumps inside loops");
+                self.set_term(Terminator::Br(break_bb));
+                Ok(())
+            }
+            StmtKind::Continue => {
+                let &(continue_bb, _) = self.loops.last().expect("sema kept jumps inside loops");
+                self.set_term(Terminator::Br(continue_bb));
                 Ok(())
             }
             StmtKind::Empty => Ok(()),

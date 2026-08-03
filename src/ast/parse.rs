@@ -239,8 +239,15 @@ impl Parser {
             TokenKind::Kw(Kw::_do) => {
                 return Err(self.error("`do`/`while` loops are not yet supported (TBD)"));
             }
-            TokenKind::Kw(Kw::_break | Kw::_continue) => {
-                return Err(self.error("`break`/`continue` are not yet supported (TBD)"));
+            TokenKind::Kw(Kw::_break) => {
+                self.consume(1);
+                self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+                StmtKind::Break
+            }
+            TokenKind::Kw(Kw::_continue) => {
+                self.consume(1);
+                self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+                StmtKind::Continue
             }
             // a declaration is a block item, not a statement (6.8.2), so it
             // cannot be the branch of an `if` — C requires the braces.

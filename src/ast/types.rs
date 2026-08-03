@@ -172,6 +172,10 @@ pub enum StmtKind {
         step: Option<Expr>,
         body: Box<Stmt>,
     },
+    // loop jumps; sema checks they sit inside a loop (`break` also allows
+    // `switch` once that exists)
+    Break,
+    Continue,
     // `ty name [= init];` — one declarator per declaration in this subset
     // (FE-16's declarator lists widen this to a `Vec` later).
     Decl { ty: CType, name: String, init: Option<Expr> },

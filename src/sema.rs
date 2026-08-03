@@ -32,6 +32,9 @@ pub struct Sema {
     // The block-scope stack of the function being checked, innermost last.
     // Each scope maps a declared name to its type (6.2.1).
     scopes: Vec<HashMap<String, CType>>,
+    // How many loop bodies enclose the statement being checked; gates
+    // `break`/`continue` (6.8.6.2/3).
+    loop_depth: u32,
 }
 
 impl Sema {
@@ -56,6 +59,7 @@ impl Sema {
                 // A fresh function scope; parameters will populate it (FE-14).
                 self.scopes.clear();
                 self.scopes.push(HashMap::new());
+                self.loop_depth = 0;
                 self.check_stmt(body, &ret)?;
             }
         }
@@ -161,7 +165,10 @@ impl Sema {
             }
             StmtKind::While { cond, body } => {
                 self.check_expr(cond)?;
-                self.check_stmt(body, ret)
+                self.loop_depth += 1;
+                self.check_stmt(body, ret)?;
+                self.loop_depth -= 1;
+                Ok(())
             }
             StmtKind::For { init, cond, step, body } => {
                 // The for clause opens a scope enclosing cond, step, and body
@@ -176,8 +183,28 @@ impl Sema {
                 if let Some(step) = step {
                     self.check_expr(step)?;
                 }
+                self.loop_depth += 1;
                 self.check_stmt(body, ret)?;
+                self.loop_depth -= 1;
                 self.scopes.pop();
+                Ok(())
+            }
+            StmtKind::Break => {
+                if self.loop_depth == 0 {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("`break` is not inside a loop")));
+                }
+                Ok(())
+            }
+            StmtKind::Continue => {
+                if self.loop_depth == 0 {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("`continue` is not inside a loop")));
+                }
                 Ok(())
             }
             StmtKind::Return(Some(expr)) => self.check_expr(expr),
