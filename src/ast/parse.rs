@@ -287,6 +287,25 @@ impl Parser {
                 self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
                 StmtKind::Continue
             }
+            TokenKind::Kw(Kw::goto) => {
+                self.consume(1);
+                let label = self.parse_ident()?;
+                self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
+                StmtKind::Goto { label }
+            }
+            // a labeled statement `ident : stmt`, told apart from an expression
+            // statement by the `:` that follows the identifier (6.8.1).
+            TokenKind::Ident { .. }
+                if matches!(
+                    self.peek2().map(|t| &t.kind),
+                    Some(TokenKind::Punct(Punct::Colon))
+                ) =>
+            {
+                let name = self.parse_ident()?;
+                self.consume_expect(TokenKind::Punct(Punct::Colon))?;
+                let body = Box::new(self.parse_stmt()?);
+                StmtKind::Label { name, body }
+            }
             // a declaration is a block item, not a statement (6.8.2), so it
             // cannot be the branch of an `if` — C requires the braces.
             k if is_type_start(k) => {

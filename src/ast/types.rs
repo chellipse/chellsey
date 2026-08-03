@@ -203,6 +203,16 @@ pub enum StmtKind {
     // `continue` inside a loop.
     Break,
     Continue,
+    // `goto label;` — an unconditional jump to a function-scoped label (6.8.6.1).
+    Goto {
+        label: String,
+    },
+    // `label: body` — a labeled statement; the label has function scope and may
+    // be the target of a `goto` that appears before it (a forward jump).
+    Label {
+        name: String,
+        body: Box<Stmt>,
+    },
     // `ty name [= init];` — one declarator per declaration in this subset
     // (FE-16's declarator lists widen this to a `Vec` later).
     Decl {

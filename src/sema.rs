@@ -39,6 +39,9 @@ pub struct Sema {
     // The enclosing `switch` statements, innermost last; gates `case`/`default`
     // and detects duplicate cases and multiple defaults (6.8.4.2).
     switches: Vec<SwitchAcc>,
+    // Every label defined in the current function (function scope, 6.2.1p3),
+    // gathered before the body walk so a forward `goto` resolves.
+    labels: HashSet<String>,
 }
 
 // Per-switch accumulator: the case values seen so far (for duplicate
@@ -74,6 +77,8 @@ impl Sema {
                 self.scopes.push(HashMap::new());
                 self.declare_params(params)?;
                 self.loop_depth = 0;
+                self.labels.clear();
+                self.collect_labels(body)?;
                 self.check_stmt(body, &ret)?;
             }
         }
@@ -168,6 +173,48 @@ impl Sema {
     /// Resolve a name against the scope stack, innermost scope first.
     fn lookup(&self, name: &str) -> Option<&CType> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+
+    /// Gather every label in a function body (labels have function scope, not
+    /// block scope — 6.2.1p3), erroring on a redefinition. Run before the body
+    /// walk so a `goto` to a not-yet-seen label resolves.
+    fn collect_labels(&mut self, stmt: &Stmt) -> Result<()> {
+        match &stmt.kind {
+            StmtKind::Label { name, body } => {
+                if !self.labels.insert(name.clone()) {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("redefinition of label `{name}`")));
+                }
+                self.collect_labels(body)
+            }
+            StmtKind::Compound(stmts) => {
+                for s in stmts {
+                    self.collect_labels(s)?;
+                }
+                Ok(())
+            }
+            StmtKind::If { then, els, .. } => {
+                self.collect_labels(then)?;
+                if let Some(els) = els {
+                    self.collect_labels(els)?;
+                }
+                Ok(())
+            }
+            StmtKind::While { body, .. }
+            | StmtKind::DoWhile { body, .. }
+            | StmtKind::Switch { body, .. }
+            | StmtKind::Case { body, .. }
+            | StmtKind::Default { body } => self.collect_labels(body),
+            StmtKind::For { init, body, .. } => {
+                if let Some(init) = init {
+                    self.collect_labels(init)?;
+                }
+                self.collect_labels(body)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn check_stmt(&mut self, stmt: &mut Stmt, ret: &CType) -> Result<()> {
@@ -311,6 +358,19 @@ impl Sema {
                         .into_error(anyhow!("`continue` is not inside a loop")));
                 }
                 Ok(())
+            }
+            StmtKind::Goto { label } => {
+                if !self.labels.contains(label) {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("use of undeclared label `{label}`")));
+                }
+                Ok(())
+            }
+            StmtKind::Label { body, .. } => {
+                // The label name was gathered in the pre-pass; check its statement.
+                self.check_stmt(body, ret)
             }
             StmtKind::Return(Some(expr)) => self.check_expr(expr),
             StmtKind::Return(None) => {

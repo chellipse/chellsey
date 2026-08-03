@@ -61,6 +61,9 @@ impl Lowerer<'_> {
             let slot = b.new_slot(ir_ty(&p.ty));
             b.scopes[0].insert(name.clone(), slot);
         }
+        // A label may be a forward `goto` target, so give every one a block
+        // before lowering the body (FE-18 / HIR-CF-1).
+        b.collect_labels(body);
         b.stmt(body)?;
         // ME-12: `main` falling off the end returns 0.
         if name == "main" {
@@ -109,6 +112,9 @@ struct FnBuilder {
     // Enclosing break/continue regions (loops and switches), innermost last.
     // Sema already rejected jumps outside their region.
     cf: Vec<CfFrame>,
+    // Label name -> its block, pre-created before lowering so a forward `goto`
+    // has a target. Sema already checked resolution and uniqueness.
+    labels: HashMap<String, BlockId>,
 }
 
 impl FnBuilder {
@@ -129,6 +135,7 @@ impl FnBuilder {
             // the function scope; parameters will land here (FE-14)
             scopes: vec![HashMap::new()],
             cf: Vec::new(),
+            labels: HashMap::new(),
         }
     }
 
@@ -154,6 +161,41 @@ impl FnBuilder {
             .rev()
             .find_map(|s| s.get(name))
             .expect("sema resolved every identifier")
+    }
+
+    /// Create a block for every label in the body, so a `goto` to a label
+    /// lowered later still has a target. Mirrors sema's label collection.
+    fn collect_labels(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::Label { name, body } => {
+                let bb = self.new_block();
+                self.labels.insert(name.clone(), bb);
+                self.collect_labels(body);
+            }
+            StmtKind::Compound(stmts) => {
+                for s in stmts {
+                    self.collect_labels(s);
+                }
+            }
+            StmtKind::If { then, els, .. } => {
+                self.collect_labels(then);
+                if let Some(els) = els {
+                    self.collect_labels(els);
+                }
+            }
+            StmtKind::While { body, .. }
+            | StmtKind::DoWhile { body, .. }
+            | StmtKind::Switch { body, .. }
+            | StmtKind::Case { body, .. }
+            | StmtKind::Default { body } => self.collect_labels(body),
+            StmtKind::For { init, body, .. } => {
+                if let Some(init) = init {
+                    self.collect_labels(init);
+                }
+                self.collect_labels(body);
+            }
+            _ => {}
+        }
     }
 
     /// Append a fresh, open block (default `ret void` terminator) and return its id.
@@ -200,13 +242,19 @@ impl FnBuilder {
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
-        // Statements following a terminator (e.g. after `return`) are dead —
-        // except `case`/`default` labels, which are reached from the switch
-        // dispatch rather than by fallthrough, so a preceding `break` does not
-        // make them unreachable.
-        if self.terminated && !matches!(stmt.kind, StmtKind::Case { .. } | StmtKind::Default { .. })
-        {
-            return Ok(());
+        // `case`/`default`/labels are entered by non-fallthrough edges (the
+        // switch dispatch or a `goto`), so they open their own block and handle
+        // a set `terminated` themselves. Any *other* statement after a
+        // terminator is unreachable by fallthrough — but it can still contain a
+        // jump target (a nested label), so it is lowered into a fresh
+        // unreachable block rather than dropped.
+        let is_target = matches!(
+            stmt.kind,
+            StmtKind::Case { .. } | StmtKind::Default { .. } | StmtKind::Label { .. }
+        );
+        if self.terminated && !is_target {
+            let dead = self.new_block();
+            self.switch_to(dead);
         }
         match &stmt.kind {
             StmtKind::Compound(stmts) => {
@@ -491,6 +539,20 @@ impl FnBuilder {
                     .expect("sema kept `continue` inside a loop");
                 self.set_term(Terminator::Br(continue_bb));
                 Ok(())
+            }
+            StmtKind::Goto { label } => {
+                let target = *self.labels.get(label).expect("sema resolved every goto target");
+                self.set_term(Terminator::Br(target));
+                Ok(())
+            }
+            StmtKind::Label { name, body } => {
+                let label_bb = *self.labels.get(name).expect("label block pre-created");
+                // the preceding code falls into the label unless it jumped away
+                if !self.terminated {
+                    self.set_term(Terminator::Br(label_bb));
+                }
+                self.switch_to(label_bb);
+                self.stmt(body)
             }
             StmtKind::Empty => Ok(()),
         }
