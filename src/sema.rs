@@ -334,6 +334,17 @@ impl Sema {
                 self.check_expr(rhs)?;
                 lhs.ty.clone().expect("just annotated")
             }
+            ExprKind::IncDec { expr: inner, .. } => {
+                // `++`/`--` need a modifiable lvalue (6.5.2.4/6.5.3.1); an ident
+                // is the only one in this subset. The result is the operand's
+                // type, whether prefix (new value) or postfix (old).
+                if !matches!(inner.kind, ExprKind::Ident { .. }) {
+                    return Err(span
+                        .into_error(anyhow!("operand of `++`/`--` is not a modifiable lvalue")));
+                }
+                self.check_expr(inner)?;
+                inner.ty.clone().expect("just annotated")
+            }
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {

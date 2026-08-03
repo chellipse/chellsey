@@ -218,6 +218,10 @@ pub enum ExprKind {
     // `op` (6.5.16.2). Lowering desugars it to a load-op-store on the lvalue's
     // slot, with `lhs` evaluated once.
     CompoundAssign { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    // `++expr` / `expr++` (6.5.3.1 / 6.5.2.4): `pre` is prefix vs postfix,
+    // `inc` is `++` vs `--`. A load-op-store like compound assignment; prefix
+    // yields the new value, postfix the old.
+    IncDec { pre: bool, inc: bool, expr: Box<Expr> },
     // `cond ? then : els` — only the taken arm evaluates (6.5.15)
     Cond { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
     // `callee(args)` — a direct call to a named function (6.5.2.2); calls

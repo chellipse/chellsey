@@ -488,6 +488,38 @@ impl FnBuilder {
                 );
                 Ok(TV { val: Value::Reg(dst), ty })
             }
+            // `++x`/`x++` (6.5.3.1/6.5.2.4): load the lvalue once, add or
+            // subtract 1, store it back. Prefix's value is the updated register;
+            // postfix's is the value loaded before the update.
+            ExprKind::IncDec { pre, inc, expr } => {
+                let ExprKind::Ident { name } = &expr.kind else {
+                    return Err(err(
+                        &expr.span,
+                        "internal: non-lvalue `++`/`--` target past sema",
+                    ));
+                };
+                let slot = self.lookup(name);
+                let cur = self.new_reg();
+                self.emit(InstKind::Load { dst: cur, slot, ty: ir_ty(&ty) }, &e.span);
+                let next = self.new_reg();
+                self.emit(
+                    InstKind::IBin {
+                        dst: next,
+                        op: if *inc { IBinOp::Add } else { IBinOp::Sub },
+                        lhs: Value::Reg(cur),
+                        rhs: Value::Const(1),
+                        ty: ir_ty(&ty),
+                        flags: UbFlags::default(),
+                    },
+                    &e.span,
+                );
+                self.emit(
+                    InstKind::Store { slot, val: Value::Reg(next), ty: ir_ty(&ty) },
+                    &e.span,
+                );
+                let val = if *pre { Value::Reg(next) } else { Value::Reg(cur) };
+                Ok(TV { val, ty })
+            }
             // `f(args)`: evaluate every argument (left to right), then call.
             // All arguments are computed before the call, so a nested call in
             // one argument can't clobber another — each has its own slot.

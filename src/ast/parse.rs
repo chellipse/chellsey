@@ -456,9 +456,19 @@ impl Parser {
     }
 
     /// `parse_unary` — prefix `- ! ~` fold into `Unary`; unary `+` is identity;
-    /// `* & ++ --` and `sizeof` are later items and TBD here.
+    /// prefix `++`/`--` build an `IncDec`; `* &` and `sizeof` are TBD here.
     fn parse_unary(&mut self) -> Result<Expr> {
         let lo = self.cursor;
+        // prefix `++`/`--`: the operand is a unary-expression (6.5.3), and the
+        // node yields the *new* value; distinct from the `- ! ~` folds below.
+        if let Some(TokenKind::Punct(p @ (Punct::PlusPlus | Punct::MinusMinus))) =
+            self.peek().ok().map(|t| t.kind.clone())
+        {
+            self.consume(1);
+            let operand = self.parse_unary()?;
+            let kind = ExprKind::IncDec { pre: true, inc: p == Punct::PlusPlus, expr: Box::new(operand) };
+            return Ok(Expr { kind, ty: None, span: self.spanned(lo) });
+        }
         let op = match self.peek()?.kind.clone() {
             TokenKind::Punct(Punct::Minus) => UnOp::Neg,
             TokenKind::Punct(Punct::Bang) => UnOp::Not,
@@ -468,10 +478,7 @@ impl Parser {
                 self.consume(1);
                 return self.parse_cast_expr();
             }
-            TokenKind::Punct(Punct::Star)
-            | TokenKind::Punct(Punct::Amp)
-            | TokenKind::Punct(Punct::PlusPlus)
-            | TokenKind::Punct(Punct::MinusMinus) => {
+            TokenKind::Punct(Punct::Star) | TokenKind::Punct(Punct::Amp) => {
                 return Err(self.error("this prefix operator is not yet supported (TBD)"));
             }
             TokenKind::Kw(Kw::sizeof) => {
@@ -485,8 +492,8 @@ impl Parser {
         Ok(Expr { kind, ty: None, span: self.spanned(lo) })
     }
 
-    /// `parse_postfix` — a direct function call `f(args)`; subscripts and
-    /// postfix `++ --` are later items and TBD here.
+    /// `parse_postfix` — a direct function call `f(args)` or a postfix
+    /// `++`/`--` (yielding the old value); subscripts are a later item.
     fn parse_postfix(&mut self) -> Result<Expr> {
         let lo = self.cursor;
         let expr = self.parse_primary()?;
@@ -504,8 +511,11 @@ impl Parser {
             Some(TokenKind::Punct(Punct::LBracket)) => {
                 Err(self.error("array subscripting is not yet supported (TBD)"))
             }
-            Some(TokenKind::Punct(Punct::PlusPlus | Punct::MinusMinus)) => {
-                Err(self.error("postfix `++`/`--` are not yet supported (TBD)"))
+            Some(TokenKind::Punct(p @ (Punct::PlusPlus | Punct::MinusMinus))) => {
+                self.consume(1);
+                let kind =
+                    ExprKind::IncDec { pre: false, inc: p == Punct::PlusPlus, expr: Box::new(expr) };
+                Ok(Expr { kind, ty: None, span: self.spanned(lo) })
             }
             _ => Ok(expr),
         }
