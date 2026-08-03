@@ -287,6 +287,29 @@ impl Sema {
                 // alongside the wider types.
                 CType::INT
             }
+            ExprKind::Call { callee, args } => {
+                // A name in scope is an object, not a function — it can't be
+                // called (function pointers are a later item).
+                if self.lookup(callee).is_some() {
+                    return Err(span.into_error(anyhow!("called object `{callee}` is not a function")));
+                }
+                let Some(sig) = self.info.funcs.get(callee.as_str()) else {
+                    return Err(span.into_error(anyhow!("call to undeclared function `{callee}`")));
+                };
+                // Arity: exact for a prototyped function; a variadic tail (once
+                // it exists) only relaxes the upper bound.
+                let (nparams, varargs, ret) = (sig.params.len(), sig.varargs, sig.ret.clone());
+                if args.len() < nparams || (!varargs && args.len() > nparams) {
+                    return Err(span.into_error(anyhow!(
+                        "`{callee}` takes {nparams} argument(s), but {} given",
+                        args.len()
+                    )));
+                }
+                for arg in args {
+                    self.check_expr(arg)?;
+                }
+                ret
+            }
             ExprKind::Assign { lhs, rhs } => {
                 // The modifiable-lvalue check (6.5.16): a declared name is the
                 // only lvalue in this subset.

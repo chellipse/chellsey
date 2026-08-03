@@ -1,6 +1,11 @@
+use std::collections::HashMap;
+
 use anyhow::anyhow;
-use object::write::{Object, StandardSection, Symbol, SymbolSection};
-use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
+use object::write::{Object, Relocation, StandardSection, Symbol, SymbolId, SymbolSection};
+use object::{
+    Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
+    SymbolFlags, SymbolKind, SymbolScope,
+};
 
 use crate::diagnostic::Error;
 use crate::ir::{self, IBinOp, IPred, InstKind, SlotId, Terminator, Value};
@@ -236,7 +241,9 @@ fn cc_of(pred: IPred) -> Cc {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+// Not `Copy`: `Call` carries the callee name. Selected instructions are always
+// consumed by value (encoded or printed once), so move semantics suffice.
+#[derive(Debug, Clone)]
 enum MInst {
     PushRbp,
     MovRbpRsp,
@@ -273,6 +280,9 @@ enum MInst {
     JmpCC { cc: Cc, target: u32 },
     // test r/m64, r64 — sets flags from `a & b` (used as `test r, r`).
     Test { a: Gpr, b: Gpr },
+    // `call rel32` to a named function; the target is left zero and patched
+    // by a relocation the linker resolves against `callee`.
+    Call { callee: String },
 }
 
 // ----- instruction selection (§2.1 spill-everything) -----------------------
@@ -433,6 +443,19 @@ impl<'a> FuncSel<'a> {
                 code.push(MInst::Store { disp: self.local(*slot), src: Gpr::Rax });
                 Ok(())
             }
+            // A direct call (SysV): materialize each argument into its argument
+            // register, `call`, then take the result from rax. The frame is
+            // 16-byte aligned (FuncSel::new), so rsp is aligned at the call as
+            // the ABI requires — no extra adjustment. Argument count is <= 6
+            // (sema bounds parameters at 6), so every argument is in a register.
+            InstKind::Call { dst, callee, args, .. } => {
+                for (arg, reg) in args.iter().zip(ARG_REGS) {
+                    self.load(arg, reg, code)?;
+                }
+                code.push(MInst::Call { callee: callee.clone() });
+                code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
+                Ok(())
+            }
         }
     }
 
@@ -481,6 +504,9 @@ struct Encoder {
     labels: Vec<usize>,
     // (rel32 byte position, target block id) for each jump awaiting a fixup.
     fixups: Vec<(usize, u32)>,
+    // (rel32 byte position, callee name) for each `call`. Unlike jumps, these
+    // cross function boundaries, so they become relocations, not local fixups.
+    calls: Vec<(usize, String)>,
 }
 
 impl Encoder {
@@ -635,6 +661,12 @@ impl Encoder {
                 self.b(0x85);
                 self.modrm(0b11, b.code(), a.code());
             }
+            MInst::Call { callee } => {
+                // call rel32 : E8 cd — target patched by a relocation.
+                self.b(0xE8);
+                self.calls.push((self.out.len(), callee));
+                self.le32(0);
+            }
         }
     }
 
@@ -673,6 +705,7 @@ fn asm(inst: MInst) -> String {
         MInst::Jmp(n) => format!("jmp bb{n}"),
         MInst::JmpCC { cc, target } => format!("j{} bb{target}", cc.name()),
         MInst::Test { a, b } => format!("test {}, {}", a.name(), b.name()),
+        MInst::Call { callee } => format!("call {callee}"),
     }
 }
 
@@ -697,17 +730,22 @@ pub fn emit_object(program: &ir::Program) -> anyhow::Result<Vec<u8>> {
     let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = obj.section_id(StandardSection::Text);
 
+    // First pass: lay every function out in `.text`, define its symbol, and
+    // remember where its call sites landed (their relocations need every
+    // function's symbol, which isn't known until the whole program is placed).
+    let mut sym_of: HashMap<String, SymbolId> = HashMap::new();
+    let mut call_sites: Vec<(u64, Vec<(usize, String)>)> = Vec::new();
     for func in &program.funcs {
         let mut enc = Encoder::default();
         for inst in FuncSel::new(func).select()? {
             enc.encode(inst);
         }
         enc.resolve();
-        let offset = obj.append_section_data(text, &enc.out, 16);
+        let base = obj.append_section_data(text, &enc.out, 16);
 
-        obj.add_symbol(Symbol {
+        let sym = obj.add_symbol(Symbol {
             name: func.name.clone().into_bytes(),
-            value: offset,
+            value: base,
             size: enc.out.len() as u64,
             kind: SymbolKind::Text,
             scope: SymbolScope::Linkage, // global, so the linker can resolve `main`
@@ -715,6 +753,42 @@ pub fn emit_object(program: &ir::Program) -> anyhow::Result<Vec<u8>> {
             section: SymbolSection::Section(text),
             flags: SymbolFlags::None,
         });
+        sym_of.insert(func.name.clone(), sym);
+        call_sites.push((base, enc.calls));
+    }
+
+    // Second pass: emit a PLT-relative relocation for each call. A callee that
+    // this program does not define (e.g. a libc function) gets an undefined
+    // symbol for the linker to resolve. Addend -4 accounts for the rel32 being
+    // measured from the end of its own 4-byte field.
+    for (base, calls) in call_sites {
+        for (off, callee) in calls {
+            let target = *sym_of.entry(callee.clone()).or_insert_with(|| {
+                obj.add_symbol(Symbol {
+                    name: callee.into_bytes(),
+                    value: 0,
+                    size: 0,
+                    kind: SymbolKind::Text,
+                    scope: SymbolScope::Dynamic,
+                    weak: false,
+                    section: SymbolSection::Undefined,
+                    flags: SymbolFlags::None,
+                })
+            });
+            obj.add_relocation(
+                text,
+                Relocation {
+                    offset: base + off as u64,
+                    symbol: target,
+                    addend: -4,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::PltRelative,
+                        encoding: RelocationEncoding::Generic,
+                        size: 32,
+                    },
+                },
+            )?;
+        }
     }
 
     obj.write()

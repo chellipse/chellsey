@@ -216,6 +216,9 @@ pub enum ExprKind {
     Assign { lhs: Box<Expr>, rhs: Box<Expr> },
     // `cond ? then : els` — only the taken arm evaluates (6.5.15)
     Cond { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
+    // `callee(args)` — a direct call to a named function (6.5.2.2); calls
+    // through a function-pointer expression are a later item.
+    Call { callee: String, args: Vec<Expr> },
 }
 
 /// Binary operators (FE-19). The full set is defined; only `+ - * / %` are

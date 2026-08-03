@@ -118,7 +118,8 @@ impl Inst {
         match &self.kind {
             InstKind::IBin { dst, .. }
             | InstKind::ICmp { dst, .. }
-            | InstKind::Load { dst, .. } => Some(*dst),
+            | InstKind::Load { dst, .. }
+            | InstKind::Call { dst, .. } => Some(*dst),
             InstKind::Store { .. } => None,
         }
     }
@@ -154,6 +155,14 @@ pub enum InstKind {
     Store {
         slot: SlotId,
         val: Value,
+        ty: Type,
+    },
+    // `%dst = call <ty> @callee(args...)` — a direct call; `ty` is the
+    // return type. Every call in this subset returns a value.
+    Call {
+        dst: u32,
+        callee: String,
+        args: Vec<Value>,
         ty: Type,
     },
 }
@@ -327,6 +336,16 @@ impl fmt::Display for InstKind {
             }
             InstKind::Load { dst, slot, ty } => write!(f, "%{dst} = load {ty} {slot}"),
             InstKind::Store { slot, val, ty } => write!(f, "store {ty} {val}, {slot}"),
+            InstKind::Call { dst, callee, args, ty } => {
+                write!(f, "%{dst} = call {ty} @{callee}(")?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{a}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }

@@ -456,6 +456,21 @@ impl FnBuilder {
                 );
                 Ok(TV { val: v.val, ty })
             }
+            // `f(args)`: evaluate every argument (left to right), then call.
+            // All arguments are computed before the call, so a nested call in
+            // one argument can't clobber another — each has its own slot.
+            ExprKind::Call { callee, args } => {
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_vals.push(self.expr(a)?.val);
+                }
+                let dst = self.new_reg();
+                self.emit(
+                    InstKind::Call { dst, callee: callee.clone(), args: arg_vals, ty: ir_ty(&ty) },
+                    &e.span,
+                );
+                Ok(TV { val: Value::Reg(dst), ty })
+            }
             ExprKind::Unary { op, expr } => {
                 let operand = self.expr(expr)?;
                 match op {

@@ -88,6 +88,7 @@ fn inst_uses(kind: &InstKind) -> Vec<&Value> {
         InstKind::IBin { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => vec![lhs, rhs],
         InstKind::Load { .. } => vec![],
         InstKind::Store { val, .. } => vec![val],
+        InstKind::Call { args, .. } => args.iter().collect(),
     }
 }
 
@@ -95,7 +96,7 @@ fn inst_uses(kind: &InstKind) -> Vec<&Value> {
 fn inst_slot(kind: &InstKind) -> Option<SlotId> {
     match kind {
         InstKind::Load { slot, .. } | InstKind::Store { slot, .. } => Some(*slot),
-        InstKind::IBin { .. } | InstKind::ICmp { .. } => None,
+        InstKind::IBin { .. } | InstKind::ICmp { .. } | InstKind::Call { .. } => None,
     }
 }
 

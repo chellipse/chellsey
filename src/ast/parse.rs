@@ -482,25 +482,49 @@ impl Parser {
         Ok(Expr { kind, ty: None, span: self.spanned(lo) })
     }
 
-    /// `parse_postfix` — calls, subscripts, and postfix `++ --` are later items
-    /// and TBD here.
+    /// `parse_postfix` — a direct function call `f(args)`; subscripts and
+    /// postfix `++ --` are later items and TBD here.
     fn parse_postfix(&mut self) -> Result<Expr> {
+        let lo = self.cursor;
         let expr = self.parse_primary()?;
-        if let Ok(tok) = self.peek() {
-            match &tok.kind {
-                TokenKind::Punct(Punct::LParen) => {
-                    return Err(self.error("function calls are not yet supported (TBD)"));
-                }
-                TokenKind::Punct(Punct::LBracket) => {
-                    return Err(self.error("array subscripting is not yet supported (TBD)"));
-                }
-                TokenKind::Punct(Punct::PlusPlus) | TokenKind::Punct(Punct::MinusMinus) => {
-                    return Err(self.error("postfix `++`/`--` are not yet supported (TBD)"));
-                }
-                _ => {}
+        match self.peek().ok().map(|t| t.kind.clone()) {
+            Some(TokenKind::Punct(Punct::LParen)) => {
+                // The callee is a bare name in this subset — calling through an
+                // arbitrary expression (a function pointer) is a later item.
+                let ExprKind::Ident { name } = expr.kind else {
+                    return Err(self.error("only named functions can be called (TBD)"));
+                };
+                let args = self.parse_args()?;
+                let kind = ExprKind::Call { callee: name, args };
+                Ok(Expr { kind, ty: None, span: self.spanned(lo) })
+            }
+            Some(TokenKind::Punct(Punct::LBracket)) => {
+                Err(self.error("array subscripting is not yet supported (TBD)"))
+            }
+            Some(TokenKind::Punct(Punct::PlusPlus | Punct::MinusMinus)) => {
+                Err(self.error("postfix `++`/`--` are not yet supported (TBD)"))
+            }
+            _ => Ok(expr),
+        }
+    }
+
+    /// A call's parenthesised argument list. Each argument is an
+    /// assignment-expression, so the commas separate arguments rather than
+    /// invoking the comma operator (6.5.2.2).
+    fn parse_args(&mut self) -> Result<Vec<Expr>> {
+        self.consume_expect(TokenKind::Punct(Punct::LParen))?;
+        let mut args = Vec::new();
+        if self.eat(TokenKind::Punct(Punct::RParen)) {
+            return Ok(args);
+        }
+        loop {
+            args.push(self.parse_assign()?);
+            if !self.eat(TokenKind::Punct(Punct::Comma)) {
+                break;
             }
         }
-        Ok(expr)
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+        Ok(args)
     }
 
     /// `parse_primary` — integer literals, identifiers, and parenthesised
