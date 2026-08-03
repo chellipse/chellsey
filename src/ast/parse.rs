@@ -261,6 +261,22 @@ impl Parser {
             TokenKind::Kw(Kw::_while) => return self.parse_while(),
             TokenKind::Kw(Kw::_for) => return self.parse_for(),
             TokenKind::Kw(Kw::_do) => return self.parse_do_while(),
+            TokenKind::Kw(Kw::switch) => return self.parse_switch(),
+            // `case constant-expression : statement` — the label is a
+            // conditional-expression (6.6), so no comma/assignment at top level.
+            TokenKind::Kw(Kw::case) => {
+                self.consume(1);
+                let value = self.parse_cond()?;
+                self.consume_expect(TokenKind::Punct(Punct::Colon))?;
+                let body = Box::new(self.parse_stmt()?);
+                StmtKind::Case { value, body }
+            }
+            TokenKind::Kw(Kw::default) => {
+                self.consume(1);
+                self.consume_expect(TokenKind::Punct(Punct::Colon))?;
+                let body = Box::new(self.parse_stmt()?);
+                StmtKind::Default { body }
+            }
             TokenKind::Kw(Kw::_break) => {
                 self.consume(1);
                 self.consume_expect(TokenKind::Punct(Punct::SemiColon))?;
@@ -367,6 +383,19 @@ impl Parser {
         self.consume_expect(TokenKind::Punct(Punct::RParen))?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt { kind: StmtKind::While { cond, body }, span: self.spanned(lo) })
+    }
+
+    /// `switch ( expr ) stmt` — the body is usually a compound holding the
+    /// `case`/`default` labels; they parse as ordinary labeled statements
+    /// (anywhere a statement is legal) and sema binds them to this switch.
+    fn parse_switch(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
+        self.consume(1); // `switch`
+        self.consume_expect(TokenKind::Punct(Punct::LParen))?;
+        let disc = self.parse_expr()?;
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+        let body = Box::new(self.parse_stmt()?);
+        Ok(Stmt { kind: StmtKind::Switch { disc, body }, span: self.spanned(lo) })
     }
 
     /// `do stmt while ( expr ) ;` — the body runs once before the first test.

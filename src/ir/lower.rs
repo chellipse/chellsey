@@ -7,7 +7,7 @@ use crate::ast::{
     BinOp, CType, Expr, ExprKind, ExtDeclKind, Param, Stmt, StmtKind, TranslationUnit, UnOp,
 };
 use crate::diagnostic::{Error, Span};
-use crate::sema::ProgramInfo;
+use crate::sema::{const_eval_int, ProgramInfo};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -70,6 +70,24 @@ impl Lowerer<'_> {
     }
 }
 
+// A break/continue region on the lowering stack, innermost last. `break`
+// leaves the nearest region (loop or switch); `continue` re-enters the nearest
+// *loop*, passing through switches. A switch frame also gathers its case/default
+// target blocks as they are lowered, for building the dispatch chain afterward.
+enum CfFrame {
+    Loop {
+        continue_bb: BlockId,
+        break_bb: BlockId,
+    },
+    Switch {
+        break_bb: BlockId,
+        disc: Value,
+        disc_ty: Type,
+        cases: Vec<(i64, BlockId)>,
+        default: Option<BlockId>,
+    },
+}
+
 struct FnBuilder {
     name: String,
     params: Vec<Type>,
@@ -88,9 +106,9 @@ struct FnBuilder {
     // sema's scope discipline exactly, so a name resolves to the same
     // declaration in both walks; sema already diagnosed the failures.
     scopes: Vec<HashMap<String, SlotId>>,
-    // (continue target, break target) per enclosing loop, innermost last.
-    // Sema already rejected loop jumps outside a loop.
-    loops: Vec<(BlockId, BlockId)>,
+    // Enclosing break/continue regions (loops and switches), innermost last.
+    // Sema already rejected jumps outside their region.
+    cf: Vec<CfFrame>,
 }
 
 impl FnBuilder {
@@ -110,7 +128,7 @@ impl FnBuilder {
             slots: Vec::new(),
             // the function scope; parameters will land here (FE-14)
             scopes: vec![HashMap::new()],
-            loops: Vec::new(),
+            cf: Vec::new(),
         }
     }
 
@@ -182,8 +200,12 @@ impl FnBuilder {
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
-        // Statements following a terminator (e.g. after `return`) are dead.
-        if self.terminated {
+        // Statements following a terminator (e.g. after `return`) are dead —
+        // except `case`/`default` labels, which are reached from the switch
+        // dispatch rather than by fallthrough, so a preceding `break` does not
+        // make them unreachable.
+        if self.terminated && !matches!(stmt.kind, StmtKind::Case { .. } | StmtKind::Default { .. })
+        {
             return Ok(());
         }
         match &stmt.kind {
@@ -266,9 +288,9 @@ impl FnBuilder {
 
                 self.switch_to(body_bb);
                 // `continue` re-tests the condition; `break` leaves the loop.
-                self.loops.push((cond_bb, exit_bb));
+                self.cf.push(CfFrame::Loop { continue_bb: cond_bb, break_bb: exit_bb });
                 self.stmt(body)?;
-                self.loops.pop();
+                self.cf.pop();
                 if !self.terminated {
                     self.set_term(Terminator::Br(cond_bb)); // the back edge
                 }
@@ -285,9 +307,9 @@ impl FnBuilder {
                 self.set_term(Terminator::Br(body_bb));
 
                 self.switch_to(body_bb);
-                self.loops.push((cond_bb, exit_bb));
+                self.cf.push(CfFrame::Loop { continue_bb: cond_bb, break_bb: exit_bb });
                 self.stmt(body)?;
-                self.loops.pop();
+                self.cf.pop();
                 if !self.terminated {
                     self.set_term(Terminator::Br(cond_bb));
                 }
@@ -326,9 +348,9 @@ impl FnBuilder {
 
                 self.switch_to(body_bb);
                 // `continue` runs the step before re-testing (6.8.6.2).
-                self.loops.push((step_bb, exit_bb));
+                self.cf.push(CfFrame::Loop { continue_bb: step_bb, break_bb: exit_bb });
                 self.stmt(body)?;
-                self.loops.pop();
+                self.cf.pop();
                 if !self.terminated {
                     self.set_term(Terminator::Br(step_bb));
                 }
@@ -344,13 +366,129 @@ impl FnBuilder {
                 self.scopes.pop();
                 Ok(())
             }
+            StmtKind::Switch { disc, body } => {
+                // Evaluate the controlling expression once; the dispatch chain
+                // reuses it across blocks (a value may be used wherever its def
+                // dominates it). Statements before the first `case` are
+                // unreachable but still lowered — into `body_entry`, which
+                // nothing branches to.
+                let d = self.expr(disc)?;
+                let disc_ty = ir_ty(&d.ty);
+                let dispatch_bb = self.new_block();
+                let exit_bb = self.new_block();
+                let body_entry = self.new_block();
+                self.set_term(Terminator::Br(dispatch_bb));
+
+                self.switch_to(body_entry);
+                self.cf.push(CfFrame::Switch {
+                    break_bb: exit_bb,
+                    disc: d.val,
+                    disc_ty,
+                    cases: Vec::new(),
+                    default: None,
+                });
+                self.stmt(body)?;
+                if !self.terminated {
+                    self.set_term(Terminator::Br(exit_bb)); // fall off the end
+                }
+                let CfFrame::Switch { disc, disc_ty, cases, default, .. } = self.cf.pop().unwrap()
+                else {
+                    unreachable!("just pushed a switch frame");
+                };
+
+                // The dispatch: compare the discriminant against each case value
+                // in turn, falling to `default` (or the exit) when none match.
+                self.switch_to(dispatch_bb);
+                for (val, target) in cases {
+                    let t = self.new_reg();
+                    self.emit(
+                        InstKind::ICmp {
+                            dst: t,
+                            pred: IPred::Eq,
+                            lhs: disc,
+                            rhs: Value::Const(val),
+                            ty: disc_ty,
+                        },
+                        &stmt.span,
+                    );
+                    let next = self.new_block();
+                    self.set_term(Terminator::CondBr {
+                        cond: Value::Reg(t),
+                        then_bb: target,
+                        else_bb: next,
+                    });
+                    self.switch_to(next);
+                }
+                self.set_term(Terminator::Br(default.unwrap_or(exit_bb)));
+
+                self.switch_to(exit_bb);
+                Ok(())
+            }
+            StmtKind::Case { value, body } => {
+                let val = const_eval_int(value).expect("sema validated the case label is constant");
+                let case_bb = self.new_block();
+                {
+                    let cases = self
+                        .cf
+                        .iter_mut()
+                        .rev()
+                        .find_map(|f| match f {
+                            CfFrame::Switch { cases, .. } => Some(cases),
+                            CfFrame::Loop { .. } => None,
+                        })
+                        .expect("sema kept `case` inside a switch");
+                    cases.push((val, case_bb));
+                }
+                // fall through from the preceding code into this case's block
+                if !self.terminated {
+                    self.set_term(Terminator::Br(case_bb));
+                }
+                self.switch_to(case_bb);
+                self.stmt(body)
+            }
+            StmtKind::Default { body } => {
+                let def_bb = self.new_block();
+                {
+                    let default = self
+                        .cf
+                        .iter_mut()
+                        .rev()
+                        .find_map(|f| match f {
+                            CfFrame::Switch { default, .. } => Some(default),
+                            CfFrame::Loop { .. } => None,
+                        })
+                        .expect("sema kept `default` inside a switch");
+                    *default = Some(def_bb);
+                }
+                if !self.terminated {
+                    self.set_term(Terminator::Br(def_bb));
+                }
+                self.switch_to(def_bb);
+                self.stmt(body)
+            }
             StmtKind::Break => {
-                let &(_, break_bb) = self.loops.last().expect("sema kept jumps inside loops");
+                let break_bb = self
+                    .cf
+                    .last()
+                    .map(|f| match f {
+                        CfFrame::Loop { break_bb, .. } | CfFrame::Switch { break_bb, .. } => {
+                            *break_bb
+                        }
+                    })
+                    .expect("sema kept `break` inside a loop or switch");
                 self.set_term(Terminator::Br(break_bb));
                 Ok(())
             }
             StmtKind::Continue => {
-                let &(continue_bb, _) = self.loops.last().expect("sema kept jumps inside loops");
+                let continue_bb = self
+                    .cf
+                    .iter()
+                    .rev()
+                    .find_map(|f| match f {
+                        CfFrame::Loop { continue_bb, .. } => Some(*continue_bb),
+                        CfFrame::Switch { .. } => None,
+                    })
+                    .expect("sema kept `continue` inside a loop");
                 self.set_term(Terminator::Br(continue_bb));
                 Ok(())
             }

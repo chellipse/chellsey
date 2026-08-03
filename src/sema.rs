@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::anyhow;
 
@@ -34,8 +34,19 @@ pub struct Sema {
     // Each scope maps a declared name to its type (6.2.1).
     scopes: Vec<HashMap<String, CType>>,
     // How many loop bodies enclose the statement being checked; gates
-    // `break`/`continue` (6.8.6.2/3).
+    // `continue` and (with `switches`) `break` (6.8.6.2/3).
     loop_depth: u32,
+    // The enclosing `switch` statements, innermost last; gates `case`/`default`
+    // and detects duplicate cases and multiple defaults (6.8.4.2).
+    switches: Vec<SwitchAcc>,
+}
+
+// Per-switch accumulator: the case values seen so far (for duplicate
+// detection) and whether a `default` label has appeared.
+#[derive(Default)]
+struct SwitchAcc {
+    values: HashSet<i64>,
+    has_default: bool,
 }
 
 impl Sema {
@@ -236,12 +247,59 @@ impl Sema {
                 self.scopes.pop();
                 Ok(())
             }
-            StmtKind::Break => {
-                if self.loop_depth == 0 {
+            StmtKind::Switch { disc, body } => {
+                // The controlling expression is an integer (int in this subset);
+                // `case`/`default` inside register against this switch.
+                self.check_expr(disc)?;
+                self.switches.push(SwitchAcc::default());
+                self.check_stmt(body, ret)?;
+                self.switches.pop();
+                Ok(())
+            }
+            StmtKind::Case { value, body } => {
+                if self.switches.is_empty() {
                     return Err(stmt
                         .span
                         .clone()
-                        .into_error(anyhow!("`break` is not inside a loop")));
+                        .into_error(anyhow!("`case` label not within a switch")));
+                }
+                // The label must be an integer constant expression (6.8.4.2).
+                let Some(v) = const_eval_int(value) else {
+                    return Err(value.span.clone().into_error(anyhow!(
+                        "case label is not an integer constant expression"
+                    )));
+                };
+                self.check_expr(value)?;
+                if !self.switches.last_mut().unwrap().values.insert(v) {
+                    return Err(value
+                        .span
+                        .clone()
+                        .into_error(anyhow!("duplicate case value `{v}`")));
+                }
+                self.check_stmt(body, ret)
+            }
+            StmtKind::Default { body } => {
+                let Some(acc) = self.switches.last_mut() else {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("`default` label not within a switch")));
+                };
+                if acc.has_default {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("multiple `default` labels in one switch")));
+                }
+                acc.has_default = true;
+                self.check_stmt(body, ret)
+            }
+            StmtKind::Break => {
+                if self.loop_depth == 0 && self.switches.is_empty() {
+                    return Err(stmt
+                        .span
+                        .clone()
+                        .into_error(anyhow!("`break` is not inside a loop or switch")));
                 }
                 Ok(())
             }
@@ -392,5 +450,56 @@ impl Sema {
         };
         expr.ty = Some(ty);
         Ok(())
+    }
+}
+
+/// Fold an integer constant expression (6.6) to its value, or `None` if it is
+/// not a constant this subset evaluates. Used for `case` labels; the seed of
+/// the HIR const-eval pass (HIR-CONST-1). Division/shift/etc. use wrapping i64
+/// arithmetic, which agrees with `int` for the small values case labels hold.
+pub(crate) fn const_eval_int(e: &Expr) -> Option<i64> {
+    match &e.kind {
+        ExprKind::IntLit { value, .. } => Some(*value as i64),
+        ExprKind::Unary { op, expr } => {
+            let v = const_eval_int(expr)?;
+            Some(match op {
+                UnOp::Neg => v.wrapping_neg(),
+                UnOp::BitNot => !v,
+                UnOp::Not => (v == 0) as i64,
+            })
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            let a = const_eval_int(lhs)?;
+            let b = const_eval_int(rhs)?;
+            Some(match op {
+                BinOp::Add => a.wrapping_add(b),
+                BinOp::Sub => a.wrapping_sub(b),
+                BinOp::Mul => a.wrapping_mul(b),
+                BinOp::Div => (b != 0).then(|| a.wrapping_div(b))?,
+                BinOp::Rem => (b != 0).then(|| a.wrapping_rem(b))?,
+                BinOp::BitAnd => a & b,
+                BinOp::BitOr => a | b,
+                BinOp::BitXor => a ^ b,
+                BinOp::Shl => a.wrapping_shl(b as u32),
+                BinOp::Shr => a.wrapping_shr(b as u32),
+                BinOp::Lt => (a < b) as i64,
+                BinOp::Gt => (a > b) as i64,
+                BinOp::Le => (a <= b) as i64,
+                BinOp::Ge => (a >= b) as i64,
+                BinOp::Eq => (a == b) as i64,
+                BinOp::Ne => (a != b) as i64,
+                BinOp::LogAnd => ((a != 0) && (b != 0)) as i64,
+                BinOp::LogOr => ((a != 0) || (b != 0)) as i64,
+            })
+        }
+        // `?:` is permitted in a constant expression; only the taken arm counts.
+        ExprKind::Cond { cond, then, els } => {
+            if const_eval_int(cond)? != 0 {
+                const_eval_int(then)
+            } else {
+                const_eval_int(els)
+            }
+        }
+        _ => None,
     }
 }

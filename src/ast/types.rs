@@ -183,8 +183,24 @@ pub enum StmtKind {
         step: Option<Expr>,
         body: Box<Stmt>,
     },
-    // loop jumps; sema checks they sit inside a loop (`break` also allows
-    // `switch` once that exists)
+    // `switch (disc) body` — kept structured (HIR-CF-3); the case/default
+    // labels live inside `body` and are matched against `disc` at lowering.
+    Switch {
+        disc: Expr,
+        body: Box<Stmt>,
+    },
+    // `case value: body` — a labeled statement; `value` is an integer constant
+    // expression. Multiple statements after it are siblings reached by fallthrough.
+    Case {
+        value: Expr,
+        body: Box<Stmt>,
+    },
+    // `default: body` — the switch's fall-through target when no case matches.
+    Default {
+        body: Box<Stmt>,
+    },
+    // loop/switch jumps; sema checks `break` sits inside a loop or switch and
+    // `continue` inside a loop.
     Break,
     Continue,
     // `ty name [= init];` — one declarator per declaration in this subset
