@@ -240,6 +240,15 @@ impl Sema {
                     return Err(span.into_error(anyhow!("use of undeclared identifier `{name}`")));
                 }
             },
+            ExprKind::Cond { cond, then, els } => {
+                self.check_expr(cond)?;
+                self.check_expr(then)?;
+                self.check_expr(els)?;
+                // Both arms are `int` in this subset, so the result is too;
+                // the full arithmetic-conversion merge of the arms is TBD
+                // alongside the wider types.
+                CType::INT
+            }
             ExprKind::Assign { lhs, rhs } => {
                 // The modifiable-lvalue check (6.5.16): a declared name is the
                 // only lvalue in this subset.

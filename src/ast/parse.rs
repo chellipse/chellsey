@@ -378,11 +378,22 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// `parse_cond` — the ternary `?:` is TBD.
+    /// `parse_cond` — the conditional operator (6.5.15): the middle is a full
+    /// expression, the third arm recurses right-associatively (`a?b:c?d:e` is
+    /// `a?b:(c?d:e)`).
     fn parse_cond(&mut self) -> Result<Expr> {
         let cond = self.parse_binary(0)?;
-        if self.at(TokenKind::Punct(Punct::Question)) {
-            return Err(self.error("the `?:` operator is not yet supported (TBD)"));
+        if self.eat(TokenKind::Punct(Punct::Question)) {
+            let then = self.parse_expr()?;
+            self.consume_expect(TokenKind::Punct(Punct::Colon))?;
+            let els = self.parse_cond()?;
+            let span = cond.span.union(&els.span);
+            let kind = ExprKind::Cond {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                els: Box::new(els),
+            };
+            return Ok(Expr { kind, ty: None, span });
         }
         Ok(cond)
     }

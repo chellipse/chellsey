@@ -14,6 +14,8 @@ int main(void) {
             h = (h * 31 + ((a < b) + (a <= b) + (a > b) + (a >= b) + (a == b) + (a != b) + !a))
                 & 0x7FFF;
             h = (h * 31 + (((a & 31) << b) - ((b << 4) >> 2))) & 0x7FFF;
+            h = (h * 31 + ((a < b ? a : b) + (a > b ? a - b : b - a))) & 0x7FFF;
+            h = (h * 31 + ((a && b) * 2 + (a || b))) & 0x7FFF;
         }
     }
     return h & 0xFF;

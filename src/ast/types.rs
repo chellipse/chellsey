@@ -205,6 +205,8 @@ pub enum ExprKind {
     // simple assignment `lhs = rhs`; compound assignment stays a surface node
     // of its own when it lands (HIR-EXP-3 desugars once, not the parser).
     Assign { lhs: Box<Expr>, rhs: Box<Expr> },
+    // `cond ? then : els` — only the taken arm evaluates (6.5.15)
+    Cond { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
 }
 
 /// Binary operators (FE-19). The full set is defined; only `+ - * / %` are

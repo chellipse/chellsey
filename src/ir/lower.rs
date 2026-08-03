@@ -393,6 +393,31 @@ impl FnBuilder {
                 self.emit(InstKind::Load { dst, slot, ty: ir_ty(&ty) }, &e.span);
                 Ok(TV { val: Value::Reg(dst), ty })
             }
+            // `c ? a : b` through a result slot, like `&&`/`||` but storing
+            // the taken arm's value unchanged — no truth normalization.
+            ExprKind::Cond { cond, then, els } => {
+                let slot = self.new_slot(ir_ty(&ty));
+                let c = self.expr(cond)?;
+                let then_bb = self.new_block();
+                let else_bb = self.new_block();
+                let join_bb = self.new_block();
+                self.set_term(Terminator::CondBr { cond: c.val, then_bb, else_bb });
+
+                self.switch_to(then_bb);
+                let t = self.expr(then)?;
+                self.emit(InstKind::Store { slot, val: t.val, ty: ir_ty(&ty) }, &e.span);
+                self.set_term(Terminator::Br(join_bb));
+
+                self.switch_to(else_bb);
+                let v = self.expr(els)?;
+                self.emit(InstKind::Store { slot, val: v.val, ty: ir_ty(&ty) }, &e.span);
+                self.set_term(Terminator::Br(join_bb));
+
+                self.switch_to(join_bb);
+                let dst = self.new_reg();
+                self.emit(InstKind::Load { dst, slot, ty: ir_ty(&ty) }, &e.span);
+                Ok(TV { val: Value::Reg(dst), ty })
+            }
             // `lhs = rhs`: evaluate the rhs, store it to the lvalue's slot; the
             // assignment's own value is the value stored (6.5.16.1).
             ExprKind::Assign { lhs, rhs } => {
