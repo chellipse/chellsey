@@ -234,6 +234,13 @@ impl Parser {
             // a nested block builds its own spanned `Stmt`
             TokenKind::Punct(Punct::LBrace) => return self.parse_comp_stmt(),
             TokenKind::Kw(Kw::_if) => return self.parse_if(),
+            TokenKind::Kw(Kw::_while) => return self.parse_while(),
+            TokenKind::Kw(Kw::_do | Kw::_for) => {
+                return Err(self.error("this loop form is not yet supported (TBD)"));
+            }
+            TokenKind::Kw(Kw::_break | Kw::_continue) => {
+                return Err(self.error("`break`/`continue` are not yet supported (TBD)"));
+            }
             // a declaration is a block item, not a statement (6.8.2), so it
             // cannot be the branch of an `if` — C requires the braces.
             k if is_type_start(k) => {
@@ -279,6 +286,17 @@ impl Parser {
             None
         };
         Ok(Stmt { kind: StmtKind::If { cond, then, els }, span: self.spanned(lo) })
+    }
+
+    /// `while ( expr ) stmt`
+    fn parse_while(&mut self) -> Result<Stmt> {
+        let lo = self.cursor;
+        self.consume(1); // `while`
+        self.consume_expect(TokenKind::Punct(Punct::LParen))?;
+        let cond = self.parse_expr()?;
+        self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+        let body = Box::new(self.parse_stmt()?);
+        Ok(Stmt { kind: StmtKind::While { cond, body }, span: self.spanned(lo) })
     }
 
     // ----- expression tower (FE-19) ----------------------------------------

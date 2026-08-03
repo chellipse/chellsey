@@ -231,6 +231,31 @@ impl FnBuilder {
                 self.switch_to(cont_bb);
                 Ok(())
             }
+            StmtKind::While { cond, body } => {
+                // The condition lives in its own block: the back edge re-enters
+                // it, so it re-evaluates on every iteration.
+                let cond_bb = self.new_block();
+                let body_bb = self.new_block();
+                let exit_bb = self.new_block();
+                self.set_term(Terminator::Br(cond_bb));
+
+                self.switch_to(cond_bb);
+                let c = self.expr(cond)?;
+                self.set_term(Terminator::CondBr {
+                    cond: c.val,
+                    then_bb: body_bb,
+                    else_bb: exit_bb,
+                });
+
+                self.switch_to(body_bb);
+                self.stmt(body)?;
+                if !self.terminated {
+                    self.set_term(Terminator::Br(cond_bb)); // the back edge
+                }
+
+                self.switch_to(exit_bb);
+                Ok(())
+            }
             StmtKind::Empty => Ok(()),
         }
     }

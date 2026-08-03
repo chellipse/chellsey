@@ -159,6 +159,10 @@ impl Sema {
                 }
                 Ok(())
             }
+            StmtKind::While { cond, body } => {
+                self.check_expr(cond)?;
+                self.check_stmt(body, ret)
+            }
             StmtKind::Return(Some(expr)) => self.check_expr(expr),
             StmtKind::Return(None) => {
                 // Every modelled function returns `int`, so a bare `return;` has
