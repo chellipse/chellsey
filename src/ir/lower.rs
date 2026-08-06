@@ -7,7 +7,7 @@ use crate::ast::{
     BinOp, CType, Expr, ExprKind, ExtDeclKind, Param, Stmt, StmtKind, TranslationUnit, UnOp,
 };
 use crate::diagnostic::{Error, Span};
-use crate::sema::{const_eval_int, ProgramInfo};
+use crate::sema::{ProgramInfo, const_eval_int};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -336,7 +336,8 @@ impl FnBuilder {
 
                 self.switch_to(body_bb);
                 // `continue` re-tests the condition; `break` leaves the loop.
-                self.cf.push(CfFrame::Loop { continue_bb: cond_bb, break_bb: exit_bb });
+                self.cf
+                    .push(CfFrame::Loop { continue_bb: cond_bb, break_bb: exit_bb });
                 self.stmt(body)?;
                 self.cf.pop();
                 if !self.terminated {
@@ -355,7 +356,8 @@ impl FnBuilder {
                 self.set_term(Terminator::Br(body_bb));
 
                 self.switch_to(body_bb);
-                self.cf.push(CfFrame::Loop { continue_bb: cond_bb, break_bb: exit_bb });
+                self.cf
+                    .push(CfFrame::Loop { continue_bb: cond_bb, break_bb: exit_bb });
                 self.stmt(body)?;
                 self.cf.pop();
                 if !self.terminated {
@@ -396,7 +398,8 @@ impl FnBuilder {
 
                 self.switch_to(body_bb);
                 // `continue` runs the step before re-testing (6.8.6.2).
-                self.cf.push(CfFrame::Loop { continue_bb: step_bb, break_bb: exit_bb });
+                self.cf
+                    .push(CfFrame::Loop { continue_bb: step_bb, break_bb: exit_bb });
                 self.stmt(body)?;
                 self.cf.pop();
                 if !self.terminated {
@@ -541,7 +544,10 @@ impl FnBuilder {
                 Ok(())
             }
             StmtKind::Goto { label } => {
-                let target = *self.labels.get(label).expect("sema resolved every goto target");
+                let target = *self
+                    .labels
+                    .get(label)
+                    .expect("sema resolved every goto target");
                 self.set_term(Terminator::Br(target));
                 Ok(())
             }
@@ -744,7 +750,11 @@ impl FnBuilder {
                     InstKind::Store { slot, val: Value::Reg(next), ty: ir_ty(&ty) },
                     &e.span,
                 );
-                let val = if *pre { Value::Reg(next) } else { Value::Reg(cur) };
+                let val = if *pre {
+                    Value::Reg(next)
+                } else {
+                    Value::Reg(cur)
+                };
                 Ok(TV { val, ty })
             }
             // `lhs , rhs` (6.5.17): evaluate the left for its side effects and

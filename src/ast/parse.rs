@@ -463,7 +463,11 @@ impl Parser {
             let kind = ExprKind::Assign { lhs: Box::new(lhs), rhs: Box::new(rhs) };
             return Ok(Expr { kind, ty: None, span });
         }
-        if let Some(op) = self.peek().ok().and_then(|tok| compound_assign_op(&tok.kind)) {
+        if let Some(op) = self
+            .peek()
+            .ok()
+            .and_then(|tok| compound_assign_op(&tok.kind))
+        {
             self.consume(1);
             let rhs = self.parse_assign()?;
             let span = lhs.span.union(&rhs.span);
@@ -531,7 +535,8 @@ impl Parser {
         {
             self.consume(1);
             let operand = self.parse_unary()?;
-            let kind = ExprKind::IncDec { pre: true, inc: p == Punct::PlusPlus, expr: Box::new(operand) };
+            let kind =
+                ExprKind::IncDec { pre: true, inc: p == Punct::PlusPlus, expr: Box::new(operand) };
             return Ok(Expr { kind, ty: None, span: self.spanned(lo) });
         }
         let op = match self.peek()?.kind.clone() {
@@ -578,8 +583,11 @@ impl Parser {
             }
             Some(TokenKind::Punct(p @ (Punct::PlusPlus | Punct::MinusMinus))) => {
                 self.consume(1);
-                let kind =
-                    ExprKind::IncDec { pre: false, inc: p == Punct::PlusPlus, expr: Box::new(expr) };
+                let kind = ExprKind::IncDec {
+                    pre: false,
+                    inc: p == Punct::PlusPlus,
+                    expr: Box::new(expr),
+                };
                 Ok(Expr { kind, ty: None, span: self.spanned(lo) })
             }
             _ => Ok(expr),

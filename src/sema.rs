@@ -312,9 +312,10 @@ impl Sema {
                 }
                 // The label must be an integer constant expression (6.8.4.2).
                 let Some(v) = const_eval_int(value) else {
-                    return Err(value.span.clone().into_error(anyhow!(
-                        "case label is not an integer constant expression"
-                    )));
+                    return Err(value
+                        .span
+                        .clone()
+                        .into_error(anyhow!("case label is not an integer constant expression")));
                 };
                 self.check_expr(value)?;
                 if !self.switches.last_mut().unwrap().values.insert(v) {
@@ -418,7 +419,9 @@ impl Sema {
                 // A name in scope is an object, not a function — it can't be
                 // called (function pointers are a later item).
                 if self.lookup(callee).is_some() {
-                    return Err(span.into_error(anyhow!("called object `{callee}` is not a function")));
+                    return Err(
+                        span.into_error(anyhow!("called object `{callee}` is not a function"))
+                    );
                 }
                 let Some(sig) = self.info.funcs.get(callee.as_str()) else {
                     return Err(span.into_error(anyhow!("call to undeclared function `{callee}`")));
@@ -454,8 +457,9 @@ impl Sema {
                 // compound operator is valid on the all-`int` operands here, so
                 // there is nothing further to constrain per operator.
                 if !matches!(lhs.kind, ExprKind::Ident { .. }) {
-                    return Err(span
-                        .into_error(anyhow!("left operand of compound assignment is not assignable")));
+                    return Err(span.into_error(anyhow!(
+                        "left operand of compound assignment is not assignable"
+                    )));
                 }
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)?;
@@ -466,8 +470,9 @@ impl Sema {
                 // is the only one in this subset. The result is the operand's
                 // type, whether prefix (new value) or postfix (old).
                 if !matches!(inner.kind, ExprKind::Ident { .. }) {
-                    return Err(span
-                        .into_error(anyhow!("operand of `++`/`--` is not a modifiable lvalue")));
+                    return Err(
+                        span.into_error(anyhow!("operand of `++`/`--` is not a modifiable lvalue"))
+                    );
                 }
                 self.check_expr(inner)?;
                 inner.ty.clone().expect("just annotated")
