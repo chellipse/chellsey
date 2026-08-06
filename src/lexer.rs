@@ -61,7 +61,6 @@ impl<'a> Lexer<'a> {
     pub fn lex(self, path: impl AsRef<Path>) -> Result<Vec<Token>> {
         // translation phases 1–4 live in the `Preprocessor`
         let tokens = preprocess::Preprocessor::new(self.sm).process(path)?;
-        println!("PPTokens: {:?}", &tokens);
 
         promote_all(tokens)
     }
