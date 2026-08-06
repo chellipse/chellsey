@@ -234,6 +234,9 @@ pub enum TokenKind {
     IntConst {
         value: u64,
         suf: IntSuf,
+        // false for octal/hex/binary, which also admit the unsigned types when
+        // the value overflows the signed candidate during typing (6.4.4.1).
+        decimal: bool,
     },
     FloatConst {
         value: f64,
@@ -457,7 +460,7 @@ impl PPToken {
             return Err(self.err("integer constant needs digits"));
         }
         let suf = self.parse_int_suf(&s[end..])?;
-        Ok(TokenKind::IntConst { value, suf })
+        Ok(TokenKind::IntConst { value, suf, decimal: radix == 10 })
     }
 
     fn convert_float(&self, t: &str, hex: bool) -> Result<TokenKind, Error> {

@@ -328,15 +328,54 @@ pub enum UnOp {
     BitNot,
 }
 
-/// Pick the type of an integer literal from its suffix (6.4.4.1). Magnitude
-/// escalation (a value too large for the suffixed type widening to the next
-/// rank) is a later refinement; the suffix alone drives the type for now.
-pub fn int_lit(value: u64, suf: IntSuf) -> ExprKind {
-    let signed = !suf.unsigned;
-    let ty = match suf.len {
-        IntLen::Int => CType::Int { signed },
-        // `long` and `long long` share one 8-byte model.
-        IntLen::Long | IntLen::LongLong => CType::Long { signed },
-    };
+/// Pick the type of an integer literal from its value, suffix, and base
+/// (6.4.4.1): the constant takes the first type in a candidate list that can
+/// represent it. The list begins at the suffixed rank; a decimal constant
+/// holds only signed types, while octal/hex/binary constants also admit the
+/// unsigned types once the value overflows the signed one. `long` and `long
+/// long` share one 8-byte model, so each rank contributes a single candidate.
+pub fn int_lit(value: u64, suf: IntSuf, decimal: bool) -> ExprKind {
+    const INT_MAX: u64 = i32::MAX as u64;
+    const UINT_MAX: u64 = u32::MAX as u64;
+    const LONG_MAX: u64 = i64::MAX as u64;
+
+    let int = CType::Int { signed: true };
+    let uint = CType::Int { signed: false };
+    let long = CType::Long { signed: true };
+    let ulong = CType::Long { signed: false };
+
+    // (type, largest value it represents), in ascending preference order.
+    let mut cands: Vec<(CType, u64)> = Vec::new();
+    match (suf.unsigned, suf.len) {
+        (true, IntLen::Int) => {
+            cands.push((uint, UINT_MAX));
+            cands.push((ulong, u64::MAX));
+        }
+        (true, _) => cands.push((ulong, u64::MAX)),
+        (false, IntLen::Int) => {
+            cands.push((int, INT_MAX));
+            if !decimal {
+                cands.push((uint, UINT_MAX));
+            }
+            cands.push((long, LONG_MAX));
+            if !decimal {
+                cands.push((ulong, u64::MAX));
+            }
+        }
+        (false, _) => {
+            cands.push((long, LONG_MAX));
+            if !decimal {
+                cands.push((ulong, u64::MAX));
+            }
+        }
+    }
+
+    // A decimal constant past LONG_MAX exhausts its signed-only list; C leaves
+    // it untyped, and like gcc we take unsigned long.
+    let ty = cands
+        .into_iter()
+        .find(|(_, max)| value <= *max)
+        .map(|(t, _)| t)
+        .unwrap_or(CType::Long { signed: false });
     ExprKind::IntLit { value, ty }
 }

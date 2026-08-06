@@ -679,9 +679,13 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr> {
         let lo = self.cursor;
         match self.peek()?.kind.clone() {
-            TokenKind::IntConst { value, suf } => {
+            TokenKind::IntConst { value, suf, decimal } => {
                 self.consume(1);
-                Ok(Expr { kind: int_lit(value, suf), ty: None, span: self.spanned(lo) })
+                Ok(Expr {
+                    kind: int_lit(value, suf, decimal),
+                    ty: None,
+                    span: self.spanned(lo),
+                })
             }
             // parentheses don't create a node — the inner expression's own span
             // stands in for the group.

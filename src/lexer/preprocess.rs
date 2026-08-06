@@ -505,7 +505,7 @@ impl<'t> Eval<'t> {
 
         match t.kind {
             PPKind::PPNumber => match t.convert_pp_number()? {
-                TokenKind::IntConst { value, suf } => {
+                TokenKind::IntConst { value, suf, .. } => {
                     // an unsuffixed constant above intmax range lives as
                     // uintmax: exact for hex/octal (6.4.4.1's ladder); for
                     // decimal C calls it untypable, and we take gcc's reading

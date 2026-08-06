@@ -9,6 +9,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: true,
     },
     IntConst {
         value: 42,
@@ -16,6 +17,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: true,
     },
     IntConst {
         value: 1000000,
@@ -23,6 +25,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: true,
     },
     IntConst {
         value: 1,
@@ -30,6 +33,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: Int,
         },
+        decimal: true,
     },
     IntConst {
         value: 1,
@@ -37,6 +41,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Long,
         },
+        decimal: true,
     },
     IntConst {
         value: 1,
@@ -44,6 +49,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: Long,
         },
+        decimal: true,
     },
     IntConst {
         value: 1,
@@ -51,6 +57,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: LongLong,
         },
+        decimal: true,
     },
     IntConst {
         value: 1,
@@ -58,6 +65,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: LongLong,
         },
+        decimal: true,
     },
     IntConst {
         value: 1,
@@ -65,6 +73,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: LongLong,
         },
+        decimal: true,
     },
     IntConst {
         value: 511,
@@ -72,6 +81,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 8,
@@ -79,6 +89,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 31,
@@ -86,6 +97,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 255,
@@ -93,6 +105,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 3735928559,
@@ -100,6 +113,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: LongLong,
         },
+        decimal: false,
     },
     IntConst {
         value: 10,
@@ -107,6 +121,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 1,
@@ -114,6 +129,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 1000000,
@@ -121,6 +137,7 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: true,
     },
     IntConst {
         value: 65535,
@@ -128,6 +145,7 @@ expression: kinds(&toks)
             unsigned: true,
             len: Int,
         },
+        decimal: false,
     },
     IntConst {
         value: 18446744073709551615,
@@ -135,5 +153,6 @@ expression: kinds(&toks)
             unsigned: false,
             len: Int,
         },
+        decimal: true,
     },
 ]
