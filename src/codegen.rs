@@ -264,6 +264,8 @@ enum MInst {
     Cqo,
     // `idiv src` (F7 /7) — rax = rdx:rax / src, rdx = remainder.
     Idiv { src: Gpr },
+    // `div src` (F7 /6) — unsigned; rdx must be zeroed first (`xor rdx, rdx`).
+    Div { src: Gpr },
     // `<op> dst, cl` (D3 /ext) — shift `dst` by the count in `cl`.
     Shift { op: ShiftOp, dst: Gpr },
     // `setcc dst_l` (0F 90+cc /0) — set `dst`'s low byte to the flag condition.
@@ -272,6 +274,9 @@ enum MInst {
     Movzx8 { dst: Gpr },
     // `movsxd dst, src_32` (63 /r) — sign-extend `src`'s low dword into `dst`.
     Movsxd { dst: Gpr, src: Gpr },
+    // `mov dst_32, src_32` (89 /r, no REX.W) — a 32-bit register write
+    // implicitly zero-extends into the full register (CastKind::Zext32).
+    MovR32 { dst: Gpr, src: Gpr },
     // A basic-block label (zero bytes); records its offset for jump fixups.
     Label(u32),
     // jmp rel32 to a block label.
@@ -325,12 +330,11 @@ impl<'a> FuncSel<'a> {
             code.push(MInst::SubRspImm(self.frame));
         }
         // Spill the incoming arguments (SysV: rdi..r9) to their parameter
-        // slots, sign-extending from 32 bits: the upper halves of argument
-        // registers are unspecified at entry, and the slots must hold the
-        // canonical sign-extended form like every other value.
+        // slots, raw. Canonicalizing the unspecified upper bits of sub-64-bit
+        // arguments is the IR's job now: hir-gen emits an explicit `Convert`
+        // re-extension per parameter, so this backend stays signedness-blind.
         for (i, _) in self.func.params.iter().enumerate() {
             let reg = ARG_REGS[i];
-            code.push(MInst::Movsxd { dst: reg, src: reg });
             code.push(MInst::Store { disp: self.local(SlotId(i as u32)), src: reg });
         }
         for block in &self.func.blocks {
@@ -387,6 +391,17 @@ impl<'a> FuncSel<'a> {
                         code.push(MInst::Idiv { src: Gpr::Rcx });
                         Gpr::Rdx // remainder
                     }
+                    // Unsigned division dividends zero-extend into rdx:rax.
+                    IBinOp::UDiv => {
+                        code.push(MInst::Alu { op: AluOp::Xor, dst: Gpr::Rdx, src: Gpr::Rdx });
+                        code.push(MInst::Div { src: Gpr::Rcx });
+                        Gpr::Rax // quotient
+                    }
+                    IBinOp::URem => {
+                        code.push(MInst::Alu { op: AluOp::Xor, dst: Gpr::Rdx, src: Gpr::Rdx });
+                        code.push(MInst::Div { src: Gpr::Rcx });
+                        Gpr::Rdx // remainder
+                    }
                     // Bitwise ops are bit-parallel, so operating on the full
                     // 64-bit sign-extended operands keeps the result in the
                     // canonical form (its bit 63 tracks the `int` sign bit).
@@ -411,10 +426,9 @@ impl<'a> FuncSel<'a> {
                         code.push(MInst::Shift { op: ShiftOp::Sar, dst: Gpr::Rax });
                         Gpr::Rax
                     }
-                    _ => {
-                        return Err(inst.span.clone().into_error(anyhow!(
-                            "this integer op is not yet supported in codegen (TBD)"
-                        )));
+                    IBinOp::LShr => {
+                        code.push(MInst::Shift { op: ShiftOp::Shr, dst: Gpr::Rax });
+                        Gpr::Rax
                     }
                 };
                 code.push(MInst::Store { disp: spill(*dst), src: result });
@@ -428,6 +442,26 @@ impl<'a> FuncSel<'a> {
                 code.push(MInst::Alu { op: AluOp::Cmp, dst: Gpr::Rax, src: Gpr::Rcx });
                 code.push(MInst::SetCC { cc: cc_of(*pred), dst: Gpr::Rax });
                 code.push(MInst::Movzx8 { dst: Gpr::Rax });
+                code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
+                Ok(())
+            }
+            // A re-extension of rax's low bits (ME-4 / BE-5). The sub-dword
+            // kinds arrive with `char`/`short` locals.
+            InstKind::Convert { dst, kind, val } => {
+                self.load(val, Gpr::Rax, code)?;
+                match kind {
+                    ir::CastKind::Sext32 => {
+                        code.push(MInst::Movsxd { dst: Gpr::Rax, src: Gpr::Rax });
+                    }
+                    ir::CastKind::Zext32 => {
+                        code.push(MInst::MovR32 { dst: Gpr::Rax, src: Gpr::Rax });
+                    }
+                    _ => {
+                        return Err(inst.span.clone().into_error(anyhow!(
+                            "this conversion is not yet supported in codegen (TBD)"
+                        )));
+                    }
+                }
                 code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
                 Ok(())
             }
@@ -610,6 +644,12 @@ impl Encoder {
                 self.b(0xF7);
                 self.modrm(0b11, 7, src.code());
             }
+            MInst::Div { src } => {
+                // div r/m64 : 48 F7 /6
+                self.rex_w(0, src.code());
+                self.b(0xF7);
+                self.modrm(0b11, 6, src.code());
+            }
             MInst::Shift { op, dst } => {
                 // OP r/m64, cl : 48 D3 /ext
                 self.rex_w(0, dst.code());
@@ -634,6 +674,14 @@ impl Encoder {
                 self.rex_w(dst.code(), src.code());
                 self.b(0x63);
                 self.modrm(0b11, dst.code(), src.code());
+            }
+            MInst::MovR32 { dst, src } => {
+                // mov r/m32, r32 : 89 /r (no REX.W — the 32-bit write
+                // zero-extends). r8/r9 would need a REX prefix for their
+                // extension bits; this backend only converts through rax.
+                assert!(dst.code() < 8 && src.code() < 8, "REX-less encoding");
+                self.b(0x89);
+                self.modrm(0b11, src.code(), dst.code());
             }
             MInst::Label(n) => {
                 let n = n as usize;
@@ -697,10 +745,12 @@ fn asm(inst: MInst) -> String {
         MInst::IMul { dst, src } => format!("imul {}, {}", dst.name(), src.name()),
         MInst::Cqo => "cqo".to_string(),
         MInst::Idiv { src } => format!("idiv {}", src.name()),
+        MInst::Div { src } => format!("div {}", src.name()),
         MInst::Shift { op, dst } => format!("{} {}, cl", op.name(), dst.name()),
         MInst::SetCC { cc, dst } => format!("set{} {}", cc.name(), dst.name8()),
         MInst::Movzx8 { dst } => format!("movzx {}, {}", dst.name(), dst.name8()),
         MInst::Movsxd { dst, src } => format!("movsxd {}, {}", dst.name(), src.name32()),
+        MInst::MovR32 { dst, src } => format!("mov {}, {}", dst.name32(), src.name32()),
         MInst::Label(n) => format!("bb{n}:"),
         MInst::Jmp(n) => format!("jmp bb{n}"),
         MInst::JmpCC { cc, target } => format!("j{} bb{target}", cc.name()),

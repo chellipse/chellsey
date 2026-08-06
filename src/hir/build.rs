@@ -54,7 +54,7 @@ fn function(
         .get(name)
         .expect("sema collected every defined function's signature");
 
-    let mut g = FnGen::new();
+    let mut g = FnGen::new(info, sig.ret.clone());
     // The function scope: parameters are the first locals, in order.
     for p in params {
         let pname = p
@@ -67,10 +67,25 @@ fn function(
     // A label may be a forward `goto` target, so number every one up front.
     g.collect_labels(body);
 
+    // Canonicalize the incoming parameters (§2.3): the ABI only promises the
+    // low bits of a sub-64-bit argument register, so re-extend each into the
+    // canonical form every consumer assumes. Explicit here — the backend's
+    // spill stores the raw registers and knows nothing about signedness.
+    let mut items = Vec::new();
+    for (i, p) in params.iter().enumerate() {
+        if p.ty.size() < 8 {
+            let local = LocalId(i as u32);
+            let raw = g.load(&mut items, local, machine_ty(&p.ty), &p.span);
+            let tv = TV { val: Value::Temp(raw), ty: p.ty.clone() };
+            let canon = g.recanon(&mut items, tv, &p.span);
+            g.store(&mut items, local, canon.val, machine_ty(&p.ty), &p.span);
+        }
+    }
+
     // The body is a compound statement (parser-guaranteed); its items become
     // the root region directly rather than a block nested in a block.
-    let mut items = match &body.kind {
-        StmtKind::Compound(stmts) => g.block_items(stmts)?,
+    match &body.kind {
+        StmtKind::Compound(stmts) => items.extend(g.block_items(stmts)?),
         _ => unreachable!("a function body is a compound statement"),
     };
     if name == "main" && !matches!(items.last(), Some(Item::Ret(_))) {
@@ -97,11 +112,15 @@ fn function(
 // wrapping the nearest loop's body*, which re-enters the loop at its tail
 // (the condition re-test / the `for` step).
 enum CfTarget {
+    // a switch carries its discriminant's type: `case` values convert to it
     Loop { brk: RegionId, cont: RegionId },
-    Switch { brk: RegionId },
+    Switch { brk: RegionId, disc: CType },
 }
 
-struct FnGen {
+struct FnGen<'a> {
+    info: &'a ProgramInfo,
+    // the declared return type; `return e` converts `e` to it
+    ret: CType,
     locals: Vec<LocalDecl>,
     // Name → local, one map per open block scope (innermost last). This
     // mirrors sema's scope discipline exactly, so a name resolves to the same
@@ -114,9 +133,11 @@ struct FnGen {
     cf: Vec<CfTarget>,
 }
 
-impl FnGen {
-    fn new() -> Self {
+impl<'a> FnGen<'a> {
+    fn new(info: &'a ProgramInfo, ret: CType) -> Self {
         Self {
+            info,
+            ret,
             locals: Vec::new(),
             scopes: vec![HashMap::new()],
             next_temp: 0,
@@ -244,6 +265,8 @@ impl FnGen {
                 self.scopes.last_mut().unwrap().insert(name.clone(), local);
                 if let Some(init) = init {
                     let v = self.expr(items, init)?;
+                    // initialization converts as assignment does (6.7.10p12)
+                    let v = self.convert(items, v, ty, &stmt.span);
                     self.store(items, local, v.val, machine_ty(ty), &stmt.span);
                 }
                 Ok(())
@@ -254,10 +277,14 @@ impl FnGen {
                 Ok(())
             }
             StmtKind::Return(expr) => {
-                // ME-12: the value is converted to the declared return type. In
-                // this all-`int` subset the conversion is the identity.
+                // ME-12: the value converts to the declared return type as if
+                // by assignment (6.8.6.4p3).
                 let val = match expr {
-                    Some(e) => Some(self.expr(items, e)?.val),
+                    Some(e) => {
+                        let v = self.expr(items, e)?;
+                        let ret = self.ret.clone();
+                        Some(self.convert(items, v, &ret, &stmt.span).val)
+                    }
                     None => None,
                 };
                 items.push(Item::Ret(val));
@@ -382,17 +409,21 @@ impl FnGen {
                 Ok(())
             }
             StmtKind::Switch { disc, body } => {
-                // Evaluate the controlling expression once, before the region;
-                // the case/default markers inside dispatch against it.
+                // Evaluate the controlling expression once (it undergoes the
+                // integer promotions, 6.8.4.2p5) before the region; the
+                // case/default markers inside dispatch against it.
                 let d = self.expr(items, disc)?;
+                let disc_ty = d.ty.promote();
+                let d = self.convert(items, d, &disc_ty, &disc.span);
                 let switch_id = self.new_region_id();
-                self.cf.push(CfTarget::Switch { brk: switch_id });
+                self.cf
+                    .push(CfTarget::Switch { brk: switch_id, disc: disc_ty.clone() });
                 let mut bi = Vec::new();
                 self.stmt(&mut bi, body)?;
                 self.cf.pop();
                 items.push(Item::Region(Region {
                     id: switch_id,
-                    kind: RegionKind::Switch { ty: machine_ty(&d.ty), scrut: d.val, body: bi },
+                    kind: RegionKind::Switch { ty: machine_ty(&disc_ty), scrut: d.val, body: bi },
                     span: stmt.span.clone(),
                 }));
                 Ok(())
@@ -400,6 +431,21 @@ impl FnGen {
             StmtKind::Case { value, body } => {
                 let value =
                     const_eval_int(value).expect("sema validated the case label is constant");
+                // the label converts to the promoted discriminant type
+                // (6.8.4.2p5), folded here so the dispatch compares canonically
+                let disc = self
+                    .cf
+                    .iter()
+                    .rev()
+                    .find_map(|f| match f {
+                        CfTarget::Switch { disc, .. } => Some(disc.clone()),
+                        CfTarget::Loop { .. } => None,
+                    })
+                    .expect("sema kept `case` inside a switch");
+                let value = match cast_kind(&disc) {
+                    Some(kind) => fold_cast(kind, value),
+                    None => value,
+                };
                 items.push(Item::Case { value });
                 self.stmt(items, body)
             }
@@ -412,7 +458,7 @@ impl FnGen {
                     .cf
                     .last()
                     .map(|f| match f {
-                        CfTarget::Loop { brk, .. } | CfTarget::Switch { brk } => *brk,
+                        CfTarget::Loop { brk, .. } | CfTarget::Switch { brk, .. } => *brk,
                     })
                     .expect("sema kept `break` inside a loop or switch");
                 items.push(Item::Break(target));
@@ -457,6 +503,49 @@ impl FnGen {
             kind: RegionKind::If { cond, then: Vec::new(), els: vec![Item::Break(target)] },
             span: span.clone(),
         }));
+    }
+
+    /// The conversion engine (ME-4): the single place a value's type changes,
+    /// maintaining the canonical-64-bit invariant (§2.3). Under it a widening
+    /// integer conversion is the identity — the canonical form already extends
+    /// per the source's signedness, which is exactly C's value conversion into
+    /// any wider type (6.3.1.3p1/p2) — so only narrowing, or re-signing at the
+    /// same width, re-extends the target's low bits. Constants fold in place.
+    fn convert(&mut self, items: &mut Vec<Item>, tv: TV, target: &CType, span: &Span) -> TV {
+        // Free: the same type, any widening, or any 64-bit target (the
+        // canonical bits are the converted value). A narrowing — or a
+        // same-width signedness flip, whose canonical upper bits differ —
+        // re-extends.
+        if tv.ty == *target || target.size() > tv.ty.size() || target.size() == 8 {
+            return TV { val: tv.val, ty: target.clone() };
+        }
+        self.emit_cast(items, tv.val, target, span)
+    }
+
+    /// Re-extend a possibly-dirty value back into its type's canonical form —
+    /// after an arithmetic result narrower than the register (a 64-bit `add`
+    /// of two canonical `int`s can carry into bit 32), or for an incoming
+    /// ABI value whose upper bits are unspecified (parameters, call results).
+    /// Some emissions are redundant (bitwise ops preserve canonical form);
+    /// uniformity is chosen over cleverness, the graph folds them later.
+    fn recanon(&mut self, items: &mut Vec<Item>, tv: TV, span: &Span) -> TV {
+        if tv.ty.size() >= 8 {
+            return tv; // full-register results are canonical by construction
+        }
+        let target = tv.ty.clone();
+        self.emit_cast(items, tv.val, &target, span)
+    }
+
+    /// Emit the `Convert` that re-extends `val`'s low bits per `target`'s width
+    /// and signedness (folded in place for a constant).
+    fn emit_cast(&mut self, items: &mut Vec<Item>, val: Value, target: &CType, span: &Span) -> TV {
+        let kind = cast_kind(target).expect("a full-register value needs no re-extension");
+        if let Value::Const(c) = val {
+            return TV { val: Value::Const(fold_cast(kind, c)), ty: target.clone() };
+        }
+        let dst = self.new_temp();
+        self.emit(items, InstKind::Convert { dst, kind, val }, span);
+        TV { val: Value::Temp(dst), ty: target.clone() }
     }
 
     /// `a && b` / `a || b` (6.5.13/14) through a join local — the phi-free
@@ -551,12 +640,15 @@ impl FnGen {
                 let join = self.new_local(machine_ty(&ty));
                 let c = self.expr(items, cond)?;
 
+                // each arm converts to the common result type (6.5.15p5)
                 let mut then_items = Vec::new();
                 let t = self.expr(&mut then_items, then)?;
+                let t = self.convert(&mut then_items, t, &ty, &e.span);
                 self.store(&mut then_items, join, t.val, machine_ty(&ty), &e.span);
 
                 let mut els_items = Vec::new();
                 let v = self.expr(&mut els_items, els)?;
+                let v = self.convert(&mut els_items, v, &ty, &e.span);
                 self.store(&mut els_items, join, v.val, machine_ty(&ty), &e.span);
 
                 let id = self.new_region_id();
@@ -580,11 +672,15 @@ impl FnGen {
                     ));
                 };
                 let local = self.lookup(name);
+                // the rhs converts to the lvalue's type, and that converted
+                // value — not the rhs — is the expression's value (6.5.16.1p2)
+                let v = self.convert(items, v, &ty, &e.span);
                 self.store(items, local, v.val, machine_ty(&ty), &e.span);
                 Ok(TV { val: v.val, ty })
             }
             // `lhs op= rhs` (6.5.16.2): load the lvalue once, combine it with
-            // the rhs under `op`, store the result back, and yield it. `lhs`
+            // the rhs under `op` *in the common computation type*, convert the
+            // result back to the lvalue's type, store it, and yield it. `lhs`
             // is an ident here, so "evaluate the lvalue once" is one lookup.
             ExprKind::CompoundAssign { op, lhs, rhs } => {
                 let ExprKind::Ident { name } = &lhs.kind else {
@@ -596,25 +692,42 @@ impl FnGen {
                 let local = self.lookup(name);
                 let cur = self.load(items, local, machine_ty(&ty), &e.span);
                 let r = self.expr(items, rhs)?;
+                // shifts promote each operand alone (6.5.7); the rest balance
+                // under the usual arithmetic conversions
+                let (common, rt) = match op {
+                    BinOp::Shl | BinOp::Shr => (ty.promote(), r.ty.promote()),
+                    _ => {
+                        let common = CType::usual_arith(&ty, &r.ty);
+                        (common.clone(), common)
+                    }
+                };
+                let cur = TV { val: Value::Temp(cur), ty: ty.clone() };
+                let cur = self.convert(items, cur, &common, &e.span);
+                let r = self.convert(items, r, &rt, &e.span);
                 let dst = self.new_temp();
                 self.emit(
                     items,
                     InstKind::IBin {
                         dst,
-                        op: ibin_op(*op).expect("a compound-assignment operator is arithmetic"),
-                        lhs: Value::Temp(cur),
+                        op: ibin_op(*op, common.is_signed())
+                            .expect("a compound-assignment operator is arithmetic"),
+                        lhs: cur.val,
                         rhs: r.val,
-                        ty: machine_ty(&ty),
+                        ty: machine_ty(&common),
                         flags: UbFlags::default(),
                     },
                     &e.span,
                 );
-                self.store(items, local, Value::Temp(dst), machine_ty(&ty), &e.span);
-                Ok(TV { val: Value::Temp(dst), ty })
+                let res = TV { val: Value::Temp(dst), ty: common };
+                let res = self.recanon(items, res, &e.span);
+                let res = self.convert(items, res, &ty, &e.span);
+                self.store(items, local, res.val, machine_ty(&ty), &e.span);
+                Ok(TV { val: res.val, ty })
             }
-            // `++x`/`x++` (6.5.3.1/6.5.2.4): load the lvalue once, add or
-            // subtract 1, store it back. Prefix's value is the updated temp;
-            // postfix's is the value loaded before the update.
+            // `++x`/`x++` (6.5.3.1/6.5.2.4): `x += 1` / `x -= 1` in the common
+            // type of the lvalue and `int`, converted back on the store.
+            // Prefix's value is the updated one; postfix's the one loaded
+            // before the update.
             ExprKind::IncDec { pre, inc, expr } => {
                 let ExprKind::Ident { name } = &expr.kind else {
                     return Err(err(
@@ -623,26 +736,28 @@ impl FnGen {
                     ));
                 };
                 let local = self.lookup(name);
+                let common = CType::usual_arith(&ty, &CType::INT);
                 let cur = self.load(items, local, machine_ty(&ty), &e.span);
+                let cv = TV { val: Value::Temp(cur), ty: ty.clone() };
+                let cv = self.convert(items, cv, &common, &e.span);
                 let next = self.new_temp();
                 self.emit(
                     items,
                     InstKind::IBin {
                         dst: next,
                         op: if *inc { IBinOp::Add } else { IBinOp::Sub },
-                        lhs: Value::Temp(cur),
+                        lhs: cv.val,
                         rhs: Value::Const(1),
-                        ty: machine_ty(&ty),
+                        ty: machine_ty(&common),
                         flags: UbFlags::default(),
                     },
                     &e.span,
                 );
-                self.store(items, local, Value::Temp(next), machine_ty(&ty), &e.span);
-                let val = if *pre {
-                    Value::Temp(next)
-                } else {
-                    Value::Temp(cur)
-                };
+                let res = TV { val: Value::Temp(next), ty: common };
+                let res = self.recanon(items, res, &e.span);
+                let res = self.convert(items, res, &ty, &e.span);
+                self.store(items, local, res.val, machine_ty(&ty), &e.span);
+                let val = if *pre { res.val } else { Value::Temp(cur) };
                 Ok(TV { val, ty })
             }
             // `lhs , rhs` (6.5.17): evaluate the left for its side effects and
@@ -651,11 +766,21 @@ impl FnGen {
                 self.expr(items, lhs)?;
                 self.expr(items, rhs)
             }
-            // `f(args)`: evaluate every argument (left to right), then call.
+            // `f(args)`: evaluate every argument (left to right), each
+            // converted to its parameter's type as if by assignment
+            // (6.5.2.2p4), then call.
             ExprKind::Call { callee, args } => {
+                let param_tys = self
+                    .info
+                    .funcs
+                    .get(callee.as_str())
+                    .expect("sema checked the callee")
+                    .params
+                    .clone();
                 let mut arg_vals = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_vals.push(self.expr(items, a)?.val);
+                for (a, pty) in args.iter().zip(&param_tys) {
+                    let v = self.expr(items, a)?;
+                    arg_vals.push(self.convert(items, v, pty, &a.span).val);
                 }
                 let dst = self.new_temp();
                 self.emit(
@@ -668,13 +793,19 @@ impl FnGen {
                     },
                     &e.span,
                 );
-                Ok(TV { val: Value::Temp(dst), ty })
+                // The ABI specifies only the return type's low bits in rax
+                // (a gcc-compiled callee leaves the rest undefined), so
+                // re-extend the result into canonical form.
+                let res = self.recanon(items, TV { val: Value::Temp(dst), ty }, &e.span);
+                Ok(res)
             }
             ExprKind::Unary { op, expr } => {
                 let operand = self.expr(items, expr)?;
                 match op {
-                    // ME-5: unary minus lowers as `0 - x`.
+                    // ME-5: unary minus lowers as `0 - x` on the promoted
+                    // operand (`ty` = its promotion, from sema).
                     UnOp::Neg => {
+                        let operand = self.convert(items, operand, &ty, &e.span);
                         let dst = self.new_temp();
                         self.emit(
                             items,
@@ -688,12 +819,16 @@ impl FnGen {
                             },
                             &e.span,
                         );
-                        Ok(TV { val: Value::Temp(dst), ty })
+                        let res = TV { val: Value::Temp(dst), ty };
+                        Ok(self.recanon(items, res, &e.span))
                     }
-                    // `~x` is `x ^ -1`: flipping all 64 bits of the
-                    // sign-extended operand is the correct `int` complement,
-                    // canonical form and all (bit 63 tracks the flipped sign).
+                    // `~x` is `x ^ -1` on the promoted operand: flipping all
+                    // 64 bits of the canonical form is the complement, and the
+                    // re-extension restores canonicality (a signed operand
+                    // stays canonical anyway; an unsigned one has its flipped
+                    // upper bits cleared back to zero).
                     UnOp::BitNot => {
+                        let operand = self.convert(items, operand, &ty, &e.span);
                         let dst = self.new_temp();
                         self.emit(
                             items,
@@ -707,7 +842,8 @@ impl FnGen {
                             },
                             &e.span,
                         );
-                        Ok(TV { val: Value::Temp(dst), ty })
+                        let res = TV { val: Value::Temp(dst), ty };
+                        Ok(self.recanon(items, res, &e.span))
                     }
                     // `!x` is `x == 0` — an icmp yielding a 0/1 int.
                     UnOp::Not => {
@@ -735,21 +871,40 @@ impl FnGen {
                 }
                 let l = self.expr(items, lhs)?;
                 let r = self.expr(items, rhs)?;
-                // Relational / equality operators compare the operands and
-                // yield a 0/1 `int` — an `icmp`, not an `IBin`. `ty` on the
-                // compare is the operand type; the result type is the outer
-                // int.
-                if let Some(pred) = int_pred(op) {
+                // Relational / equality operators balance their operands under
+                // the usual arithmetic conversions and yield a 0/1 `int` — an
+                // `icmp` whose predicate signedness is the *common* type's,
+                // not the result's (`ty` here is the outer int).
+                if is_comparison(*op) {
+                    let common = CType::usual_arith(&l.ty, &r.ty);
+                    let l = self.convert(items, l, &common, &e.span);
+                    let r = self.convert(items, r, &common, &e.span);
+                    let pred = int_pred(*op, common.is_signed()).expect("just classified");
                     let dst = self.new_temp();
                     self.emit(
                         items,
-                        InstKind::ICmp { dst, pred, lhs: l.val, rhs: r.val, ty: machine_ty(&l.ty) },
+                        InstKind::ICmp {
+                            dst,
+                            pred,
+                            lhs: l.val,
+                            rhs: r.val,
+                            ty: machine_ty(&common),
+                        },
                         &e.span,
                     );
                     return Ok(TV { val: Value::Temp(dst), ty });
                 }
-                // Operands are signed `int` in this subset, so the signed ops.
-                let op = ibin_op(*op).expect("comparisons and short-circuits are handled above");
+                // Arithmetic: `ty` (from sema) is the computation type — the
+                // UAC common type, or for shifts the promoted left operand,
+                // with the count promoted on its own axis (6.5.7p3).
+                let rt = match op {
+                    BinOp::Shl | BinOp::Shr => r.ty.promote(),
+                    _ => ty.clone(),
+                };
+                let l = self.convert(items, l, &ty, &e.span);
+                let r = self.convert(items, r, &rt, &e.span);
+                let op = ibin_op(*op, ty.is_signed())
+                    .expect("comparisons and short-circuits are handled above");
                 let dst = self.new_temp();
                 self.emit(
                     items,
@@ -763,7 +918,8 @@ impl FnGen {
                     },
                     &e.span,
                 );
-                Ok(TV { val: Value::Temp(dst), ty })
+                let res = TV { val: Value::Temp(dst), ty };
+                Ok(self.recanon(items, res, &e.span))
             }
         }
     }
@@ -785,39 +941,81 @@ fn machine_ty(ct: &CType) -> Type {
     }
 }
 
-/// The integer-arithmetic opcode for an arithmetic/bitwise/shift operator, or
-/// `None` for the relational/equality/short-circuit operators (those desugar
-/// to an `icmp` or to control flow, never an `IBin`). Operands are signed
-/// `int` in this subset, so division and `>>` map to the signed opcodes.
-fn ibin_op(op: BinOp) -> Option<IBinOp> {
+/// The integer-arithmetic opcode for an arithmetic/bitwise/shift operator in a
+/// computation type of the given signedness, or `None` for the relational/
+/// equality/short-circuit operators (those desugar to an `icmp` or to control
+/// flow, never an `IBin`). Division, remainder, and `>>` are the operators
+/// whose machine behavior depends on signedness.
+fn ibin_op(op: BinOp, signed: bool) -> Option<IBinOp> {
     Some(match op {
         BinOp::Add => IBinOp::Add,
         BinOp::Sub => IBinOp::Sub,
         BinOp::Mul => IBinOp::Mul,
-        BinOp::Div => IBinOp::SDiv,
-        BinOp::Rem => IBinOp::SRem,
+        BinOp::Div if signed => IBinOp::SDiv,
+        BinOp::Div => IBinOp::UDiv,
+        BinOp::Rem if signed => IBinOp::SRem,
+        BinOp::Rem => IBinOp::URem,
         BinOp::BitAnd => IBinOp::And,
         BinOp::BitOr => IBinOp::Or,
         BinOp::BitXor => IBinOp::Xor,
         BinOp::Shl => IBinOp::Shl,
-        BinOp::Shr => IBinOp::AShr,
+        BinOp::Shr if signed => IBinOp::AShr,
+        BinOp::Shr => IBinOp::LShr,
         _ => return None,
     })
 }
 
-/// The signed comparison predicate for a relational/equality operator, or
-/// `None` for any other operator. `int` is signed, so orderings map to the
-/// signed predicates.
-fn int_pred(op: &BinOp) -> Option<IPred> {
+fn is_comparison(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne
+    )
+}
+
+/// The comparison predicate for a relational/equality operator over operands
+/// of the given (common-type) signedness, or `None` for any other operator.
+fn int_pred(op: BinOp, signed: bool) -> Option<IPred> {
     Some(match op {
-        BinOp::Lt => IPred::SLt,
-        BinOp::Gt => IPred::SGt,
-        BinOp::Le => IPred::SLe,
-        BinOp::Ge => IPred::SGe,
+        BinOp::Lt if signed => IPred::SLt,
+        BinOp::Lt => IPred::ULt,
+        BinOp::Gt if signed => IPred::SGt,
+        BinOp::Gt => IPred::UGt,
+        BinOp::Le if signed => IPred::SLe,
+        BinOp::Le => IPred::ULe,
+        BinOp::Ge if signed => IPred::SGe,
+        BinOp::Ge => IPred::UGe,
         BinOp::Eq => IPred::Eq,
         BinOp::Ne => IPred::Ne,
         _ => return None,
     })
+}
+
+/// The re-extension that makes a value canonical for `ty` — its width and
+/// signedness as a `CastKind` — or `None` for full-register types, which are
+/// canonical as-is.
+fn cast_kind(ty: &CType) -> Option<CastKind> {
+    Some(match (ty.size(), ty.is_signed()) {
+        (1, true) => CastKind::Sext8,
+        (1, false) => CastKind::Zext8,
+        (2, true) => CastKind::Sext16,
+        (2, false) => CastKind::Zext16,
+        (4, true) => CastKind::Sext32,
+        (4, false) => CastKind::Zext32,
+        _ => return None,
+    })
+}
+
+/// Apply a re-extension to a constant. What `emit_cast` emits as an
+/// instruction, applied at build time so literals stay immediates.
+fn fold_cast(kind: CastKind, c: i64) -> i64 {
+    match kind {
+        CastKind::Sext8 => c as i8 as i64,
+        CastKind::Zext8 => c as u8 as i64,
+        CastKind::Sext16 => c as i16 as i64,
+        CastKind::Zext16 => c as u16 as i64,
+        CastKind::Sext32 => c as i32 as i64,
+        CastKind::Zext32 => c as u32 as i64,
+    }
 }
 
 fn err(span: &Span, msg: &str) -> Error {

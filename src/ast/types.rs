@@ -91,6 +91,36 @@ impl CType {
             _ => None,
         }
     }
+
+    /// The integer promotions (6.3.1.1p2): types of rank below `int` promote
+    /// to `int` (every value of `bool`/`char`/`short` fits). Applied to each
+    /// operand of arithmetic, and alone for `~`/unary `-` and shift operands.
+    pub fn promote(&self) -> CType {
+        match self {
+            CType::Bool | CType::Char { .. } | CType::Short { .. } => CType::INT,
+            other => other.clone(),
+        }
+    }
+
+    /// The usual arithmetic conversions (6.3.1.8) for two integer operands:
+    /// promote both, then the common type is the higher rank; at equal rank
+    /// with mixed signedness the unsigned type wins. (`long` is 8 bytes and
+    /// `int` 4 in this model, so a signed `long` represents every `unsigned
+    /// int` — the mixed-rank case never needs the unsigned-of-higher fallback.)
+    pub fn usual_arith(a: &CType, b: &CType) -> CType {
+        let (a, b) = (a.promote(), b.promote());
+        if a == b {
+            return a;
+        }
+        let long = |t: &CType| matches!(t, CType::Long { .. });
+        match (long(&a), long(&b)) {
+            (true, false) => a,
+            (false, true) => b,
+            // equal rank, signedness differs (equal types returned above)
+            (false, false) => CType::Int { signed: false },
+            (true, true) => CType::Long { signed: false },
+        }
+    }
 }
 
 impl fmt::Display for CType {

@@ -4,7 +4,7 @@ use crate::diagnostic::Span;
 // The machine-type lattice and operator vocabulary are cross-stage
 // (`src/types.rs`); re-exported so this module stays the one-stop import for
 // IR consumers.
-pub use crate::types::{IBinOp, IPred, Type, UbFlags};
+pub use crate::types::{CastKind, IBinOp, IPred, Type, UbFlags};
 
 /// An IR operand: an immediate, a defined SSA register, or a float immediate.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +40,7 @@ impl Inst {
         match &self.kind {
             InstKind::IBin { dst, .. }
             | InstKind::ICmp { dst, .. }
+            | InstKind::Convert { dst, .. }
             | InstKind::Load { dst, .. }
             | InstKind::Call { dst, .. } => Some(*dst),
             InstKind::Store { .. } => None,
@@ -66,6 +67,12 @@ pub enum InstKind {
         lhs: Value,
         rhs: Value,
         ty: Type,
+    },
+    // `%dst = <kind> val` — a value conversion / canonical re-extension (ME-4).
+    Convert {
+        dst: u32,
+        kind: CastKind,
+        val: Value,
     },
     // `%dst = load <ty> $slot` — read a stack slot (MIR-STR-4 memory form).
     Load {
@@ -204,6 +211,7 @@ impl fmt::Display for InstKind {
             InstKind::ICmp { dst, pred, lhs, rhs, ty } => {
                 write!(f, "%{dst} = icmp {pred} {ty} {lhs}, {rhs}")
             }
+            InstKind::Convert { dst, kind, val } => write!(f, "%{dst} = {kind} {val}"),
             InstKind::Load { dst, slot, ty } => write!(f, "%{dst} = load {ty} {slot}"),
             InstKind::Store { slot, val, ty } => write!(f, "store {ty} {val}, {slot}"),
             InstKind::Call { dst, callee, args, ty } => {

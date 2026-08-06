@@ -86,8 +86,8 @@ fn check_use(v: &Value, defined: &HashSet<u32>) -> Result<(), String> {
 fn inst_uses(kind: &InstKind) -> Vec<&Value> {
     match kind {
         InstKind::IBin { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => vec![lhs, rhs],
+        InstKind::Convert { val, .. } | InstKind::Store { val, .. } => vec![val],
         InstKind::Load { .. } => vec![],
-        InstKind::Store { val, .. } => vec![val],
         InstKind::Call { args, .. } => args.iter().collect(),
     }
 }
@@ -96,7 +96,10 @@ fn inst_uses(kind: &InstKind) -> Vec<&Value> {
 fn inst_slot(kind: &InstKind) -> Option<SlotId> {
     match kind {
         InstKind::Load { slot, .. } | InstKind::Store { slot, .. } => Some(*slot),
-        InstKind::IBin { .. } | InstKind::ICmp { .. } | InstKind::Call { .. } => None,
+        InstKind::IBin { .. }
+        | InstKind::ICmp { .. }
+        | InstKind::Convert { .. }
+        | InstKind::Call { .. } => None,
     }
 }
 

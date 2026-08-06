@@ -127,26 +127,87 @@ impl Parser {
         Ok(ExtDecl { kind, span: self.spanned(lo) })
     }
 
-    /// The v1 subset accepts a single `int` or `void` specifier. The full
-    /// base-type fold (`long int`, `unsigned`, `struct`, ...) is FE-13, so any
-    /// other specifier — or a specifier *run* — is a clean TBD.
+    /// Fold a specifier run (`unsigned long int`, `long long`, ...) into one
+    /// canonical `CType` (FE-13). Order is free (6.7.2p2: `int long unsigned`
+    /// is legal), so the run is gathered into counts first and validated as a
+    /// combination. `struct`/`union`/`enum`/`_BitInt`/`_Complex` are TBD.
     fn parse_type_specifiers(&mut self) -> Result<CType> {
-        let ty = match &self.peek()?.kind {
-            TokenKind::Kw(Kw::int) => CType::INT,
-            TokenKind::Kw(Kw::void) => CType::Void,
-            TokenKind::Kw(kw) if is_type_kw(kw) => {
-                return Err(self.error("this type specifier is not yet supported (TBD)"));
-            }
-            _ => return Err(self.error("expected a type specifier")),
-        };
-        self.consume(1);
+        // the base-type keyword, at most one of: void bool char int float double
+        let mut base: Option<Kw> = None;
+        let mut signed: Option<bool> = None;
+        let mut longs = 0u8;
+        let mut short = false;
 
-        if let Ok(tok) = self.peek()
-            && let TokenKind::Kw(kw) = &tok.kind
-            && is_type_kw(kw)
-        {
-            return Err(self.error("compound type specifiers are not yet supported (TBD)"));
+        while let Ok(Token { kind: TokenKind::Kw(kw), .. }) = self.peek() {
+            match kw {
+                Kw::void | Kw::bool | Kw::char | Kw::int | Kw::float | Kw::double => {
+                    if base.is_some() {
+                        return Err(self.error("two base types in one specifier run"));
+                    }
+                    base = Some(kw.clone());
+                }
+                Kw::signed | Kw::unsigned => {
+                    if signed.is_some() {
+                        return Err(self.error("both `signed` and `unsigned` in one specifier run"));
+                    }
+                    signed = Some(*kw == Kw::signed);
+                }
+                Kw::long => {
+                    if longs == 2 {
+                        return Err(self.error("`long long long` is too long"));
+                    }
+                    longs += 1;
+                }
+                Kw::short => {
+                    if short {
+                        return Err(self.error("duplicate `short`"));
+                    }
+                    short = true;
+                }
+                kw if is_type_kw(kw) => {
+                    return Err(self.error("this type specifier is not yet supported (TBD)"));
+                }
+                _ => break,
+            }
+            self.consume(1);
         }
+
+        // Validate the combination and canonicalize. `signed` is the default
+        // wherever the axis applies; `short`/`long` modify only `int` (alone or
+        // spelled out); `char` keeps its own signedness axis.
+        let is_signed = signed.unwrap_or(true);
+        let modified = short || longs > 0 || signed.is_some();
+        let ty = match base {
+            Some(Kw::void) | Some(Kw::bool) | Some(Kw::float) if modified => {
+                return Err(self.error("invalid type specifier combination"));
+            }
+            Some(Kw::void) => CType::Void,
+            Some(Kw::bool) => CType::Bool,
+            Some(Kw::float) => CType::Float,
+            Some(Kw::double) if short || signed.is_some() || longs > 1 => {
+                return Err(self.error("invalid type specifier combination"));
+            }
+            // `long double` is the x87 80-bit type, a later item.
+            Some(Kw::double) if longs == 1 => {
+                return Err(self.error("`long double` is not yet supported (TBD)"));
+            }
+            Some(Kw::double) => CType::Double,
+            Some(Kw::char) if short || longs > 0 => {
+                return Err(self.error("invalid type specifier combination"));
+            }
+            Some(Kw::char) => CType::Char { signed: is_signed },
+            Some(Kw::int) | None if short && longs > 0 => {
+                return Err(self.error("both `short` and `long` in one specifier run"));
+            }
+            Some(Kw::int) | None if short => CType::Short { signed: is_signed },
+            // `long` == `long long` == 8 bytes in this model.
+            Some(Kw::int) | None if longs > 0 => CType::Long { signed: is_signed },
+            Some(Kw::int) => CType::Int { signed: is_signed },
+            // a bare `signed`/`unsigned` means `int`
+            None if signed.is_some() => CType::Int { signed: is_signed },
+            None => return Err(self.error("expected a type specifier")),
+            Some(_) => unreachable!("base is only set to a base-type keyword"),
+        };
         Ok(ty)
     }
 

@@ -97,19 +97,20 @@ impl Sema {
             }
         };
 
-        // v1 subset: only `int` functions are modelled end-to-end.
-        if *ret != CType::INT {
+        // Current subset: the `int`/`long` family (both signednesses). The
+        // sub-`int` types and floats are the next widenings (TBD).
+        if !supported_scalar(ret) {
             return Err(decl
                 .span
                 .clone()
-                .into_error(anyhow!("only `int` functions are supported (TBD)")));
+                .into_error(anyhow!("`{ret}` functions are not yet supported (TBD)")));
         }
         for p in params {
-            if p.ty != CType::INT {
+            if !supported_scalar(&p.ty) {
                 return Err(p
                     .span
                     .clone()
-                    .into_error(anyhow!("only `int` parameters are supported (TBD)")));
+                    .into_error(anyhow!("`{}` parameters are not yet supported (TBD)", p.ty)));
             }
         }
         // v1 passes every argument in a register (SysV: rdi..r9).
@@ -229,12 +230,12 @@ impl Sema {
                 Ok(())
             }
             StmtKind::Decl { ty, name, init } => {
-                // v1 subset: only `int` locals are modelled end-to-end.
-                if *ty != CType::INT {
+                // Current subset: the `int`/`long` family (both signednesses).
+                if !supported_scalar(ty) {
                     return Err(stmt
                         .span
                         .clone()
-                        .into_error(anyhow!("only `int` locals are supported (TBD)")));
+                        .into_error(anyhow!("`{ty}` locals are not yet supported (TBD)")));
                 }
                 let scope = self.scopes.last_mut().unwrap();
                 if scope.insert(name.clone(), ty.clone()).is_some() {
@@ -410,10 +411,12 @@ impl Sema {
                 self.check_expr(cond)?;
                 self.check_expr(then)?;
                 self.check_expr(els)?;
-                // Both arms are `int` in this subset, so the result is too;
-                // the full arithmetic-conversion merge of the arms is TBD
-                // alongside the wider types.
-                CType::INT
+                // Both arms are arithmetic here, so the result is their common
+                // type under the usual arithmetic conversions (6.5.15p5).
+                CType::usual_arith(
+                    then.ty.as_ref().expect("just annotated"),
+                    els.ty.as_ref().expect("just annotated"),
+                )
             }
             ExprKind::Call { callee, args } => {
                 // A name in scope is an object, not a function — it can't be
@@ -486,14 +489,24 @@ impl Sema {
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {
-                    // `-int`/`~int` promote to `int`; `!` yields a 0/1 `int`
-                    UnOp::Neg | UnOp::BitNot | UnOp::Not => CType::INT,
+                    // `-x`/`~x` yield the promoted operand type (6.5.3.3);
+                    // `!` yields a 0/1 `int`
+                    UnOp::Neg | UnOp::BitNot => {
+                        inner.ty.as_ref().expect("just annotated").promote()
+                    }
+                    UnOp::Not => CType::INT,
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)?;
+                let (l, r) = (
+                    lhs.ty.as_ref().expect("just annotated"),
+                    rhs.ty.as_ref().expect("just annotated"),
+                );
                 match op {
+                    // arithmetic and bitwise operators: the usual arithmetic
+                    // conversions produce the common (result) type (6.3.1.8)
                     BinOp::Add
                     | BinOp::Sub
                     | BinOp::Mul
@@ -501,9 +514,10 @@ impl Sema {
                     | BinOp::Rem
                     | BinOp::BitAnd
                     | BinOp::BitOr
-                    | BinOp::BitXor
-                    | BinOp::Shl
-                    | BinOp::Shr => CType::INT,
+                    | BinOp::BitXor => CType::usual_arith(l, r),
+                    // shifts take each operand's *own* promotion; the result is
+                    // the promoted left operand (6.5.7p3) — no UAC balancing
+                    BinOp::Shl | BinOp::Shr => l.promote(),
                     // relational / equality operators yield a 0/1 `int`
                     BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
                         CType::INT
@@ -516,6 +530,13 @@ impl Sema {
         expr.ty = Some(ty);
         Ok(())
     }
+}
+
+/// Is this type in the currently-modelled subset? The `int`/`long` family
+/// (both signednesses) is end-to-end; `bool`/`char`/`short` and floats are the
+/// next widenings.
+fn supported_scalar(ty: &CType) -> bool {
+    matches!(ty, CType::Int { .. } | CType::Long { .. })
 }
 
 /// Fold an integer constant expression (6.6) to its value, or `None` if it is

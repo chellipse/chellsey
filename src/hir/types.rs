@@ -15,7 +15,7 @@ use crate::diagnostic::Span;
 // The machine-type lattice and operator vocabulary are cross-stage
 // (`src/types.rs`); re-exported so this module stays the one-stop import for
 // HIR consumers.
-pub use crate::types::{IBinOp, IPred, Type, UbFlags};
+pub use crate::types::{CastKind, IBinOp, IPred, Type, UbFlags};
 
 /// A single-assignment temporary, `%n`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +71,7 @@ impl Inst {
         match &self.kind {
             InstKind::IBin { dst, .. }
             | InstKind::ICmp { dst, .. }
+            | InstKind::Convert { dst, .. }
             | InstKind::LoadLocal { dst, .. }
             | InstKind::Call { dst, .. } => Some(*dst),
             InstKind::StoreLocal { .. } => None,
@@ -82,7 +83,9 @@ impl InstKind {
     #[allow(dead_code)]
     pub fn effect(&self) -> Effect {
         match self {
-            InstKind::IBin { .. } | InstKind::ICmp { .. } => Effect::Pure,
+            InstKind::IBin { .. } | InstKind::ICmp { .. } | InstKind::Convert { .. } => {
+                Effect::Pure
+            }
             InstKind::LoadLocal { .. } => Effect::Read,
             InstKind::StoreLocal { .. } => Effect::Write,
             InstKind::Call { .. } => Effect::Opaque,
@@ -109,6 +112,13 @@ pub enum InstKind {
         lhs: Value,
         rhs: Value,
         ty: Type,
+    },
+    // `%dst = <kind> val` — the explicit value conversion (HIR-EXP-1); the
+    // one instruction that changes a value's type/width (ME-4).
+    Convert {
+        dst: TempId,
+        kind: CastKind,
+        val: Value,
     },
     // `%dst = load <ty> $local` — an explicit lvalue-to-rvalue read
     // (HIR-EXP-2). Volatility is a property of the access (HIR-TY-2).
@@ -333,6 +343,7 @@ impl fmt::Display for InstKind {
             InstKind::ICmp { dst, pred, lhs, rhs, ty } => {
                 write!(f, "{dst} = icmp {pred} {ty} {lhs}, {rhs}")
             }
+            InstKind::Convert { dst, kind, val } => write!(f, "{dst} = {kind} {val}"),
             InstKind::LoadLocal { dst, local, ty, volatile } => {
                 let v = if *volatile { "volatile " } else { "" };
                 write!(f, "{dst} = load {v}{ty} {local}")

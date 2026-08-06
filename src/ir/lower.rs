@@ -326,6 +326,9 @@ impl Elab {
                 rhs: value(rhs),
                 ty: *ty,
             },
+            hir::InstKind::Convert { dst, kind, val } => {
+                InstKind::Convert { dst: dst.0, kind: *kind, val: value(val) }
+            }
             hir::InstKind::LoadLocal { dst, local, ty, .. } => {
                 InstKind::Load { dst: dst.0, slot: SlotId(local.0), ty: *ty }
             }

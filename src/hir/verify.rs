@@ -175,6 +175,7 @@ impl Checker<'_> {
         match kind {
             InstKind::IBin { dst, .. }
             | InstKind::ICmp { dst, .. }
+            | InstKind::Convert { dst, .. }
             | InstKind::LoadLocal { dst, .. }
             | InstKind::Call { dst, .. } => self.define(*dst),
             InstKind::StoreLocal { .. } => Ok(()),
@@ -213,8 +214,8 @@ impl Checker<'_> {
 fn inst_uses(kind: &InstKind) -> Vec<&Value> {
     match kind {
         InstKind::IBin { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => vec![lhs, rhs],
+        InstKind::Convert { val, .. } | InstKind::StoreLocal { val, .. } => vec![val],
         InstKind::LoadLocal { .. } => vec![],
-        InstKind::StoreLocal { val, .. } => vec![val],
         InstKind::Call { args, .. } => args.iter().collect(),
     }
 }
@@ -223,7 +224,10 @@ fn inst_uses(kind: &InstKind) -> Vec<&Value> {
 fn inst_local(kind: &InstKind) -> Option<LocalId> {
     match kind {
         InstKind::LoadLocal { local, .. } | InstKind::StoreLocal { local, .. } => Some(*local),
-        InstKind::IBin { .. } | InstKind::ICmp { .. } | InstKind::Call { .. } => None,
+        InstKind::IBin { .. }
+        | InstKind::ICmp { .. }
+        | InstKind::Convert { .. }
+        | InstKind::Call { .. } => None,
     }
 }
 

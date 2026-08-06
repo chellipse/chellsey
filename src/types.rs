@@ -90,6 +90,24 @@ pub struct UbFlags {
     pub exact: bool,
 }
 
+/// Value-conversion kinds for `convert` (ME-4). Under the canonical-64-bit
+/// invariant (§2.3: every integer value lives sign- or zero-extended to the
+/// full register per its C type), an integer conversion is either free
+/// (widening — the canonical form already *is* the converted value) or a
+/// re-extension of the low `N` bits per the *target*'s signedness — these.
+/// Signedness lives here, in the operation; the machine types stay signless.
+/// The float kinds (`IToF`/`FToI`/`RoundF32`) arrive with ME-6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum CastKind {
+    Sext8,
+    Sext16,
+    Sext32,
+    Zext8,
+    Zext16,
+    Zext32,
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -101,6 +119,19 @@ impl fmt::Display for Type {
             Type::F32 => "f32",
             Type::F64 => "f64",
             Type::Ptr => "ptr",
+        })
+    }
+}
+
+impl fmt::Display for CastKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            CastKind::Sext8 => "sext8",
+            CastKind::Sext16 => "sext16",
+            CastKind::Sext32 => "sext32",
+            CastKind::Zext8 => "zext8",
+            CastKind::Zext16 => "zext16",
+            CastKind::Zext32 => "zext32",
         })
     }
 }
