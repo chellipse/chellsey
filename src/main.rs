@@ -5,9 +5,11 @@ use clap::Parser;
 pub mod ast;
 pub mod codegen;
 pub mod diagnostic;
+pub mod hir;
 pub mod ir;
 pub mod lexer;
 pub mod sema;
+pub mod types;
 
 use diagnostic::SourceManager;
 
@@ -49,22 +51,28 @@ fn main() {
 
 fn compile(sources: &SourceManager, path: &Path, out: &Path) -> anyhow::Result<()> {
     let tokens = lexer::Lexer::new(sources).lex(path)?;
-    println!("Tokens: {:?}", &tokens);
+    println!("Tokens:\n{tokens:?}\n");
 
     let mut ast = ast::Parser::new(tokens).parse()?;
-    println!("AST: {:?}", &ast);
+    println!("AST:\n{ast:?}\n");
 
-    // Sema annotates the AST (pass 2 fills each expression's type) and hands the
-    // middle-end a `ProgramInfo`; the AST is frozen afterwards.
+    // Sema annotates the AST (pass 2 fills each expression's type) and hands
+    // hir-gen a `ProgramInfo`; the AST is frozen afterwards.
     let info = sema::Sema::new().analyze(&mut ast)?;
 
-    let ir = ir::lower(&ast, &info)?;
-    println!("IR:\n{ir}");
+    // The frontend's terminal form: fully desugared and explicit (hir_design.org).
+    let hir = hir::build(&ast, &info)?;
+    println!("HIR:\n{hir}\n");
 
-    // Malformed IR is a compiler bug, not a user error — surface it loudly.
+    // Malformed HIR/IR is a compiler bug, not a user error — surface it loudly.
+    hir::verify(&hir).map_err(|e| anyhow::anyhow!("internal compiler error: invalid HIR: {e}"))?;
+
+    let ir = ir::lower(&hir);
+    println!("IR:\n{ir}\n");
+
     ir::verify(&ir).map_err(|e| anyhow::anyhow!("internal compiler error: invalid IR: {e}"))?;
 
-    println!("ASM:\n{}", codegen::assembly(&ir)?);
+    println!("ASM:\n{}\n", codegen::assembly(&ir)?);
 
     let obj = codegen::emit_object(&ir)?;
     std::fs::write(out, obj)?;
