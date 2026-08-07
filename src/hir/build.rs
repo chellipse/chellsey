@@ -519,6 +519,29 @@ impl<'a> FnGen<'a> {
         if tv.ty == *target || target.size() > tv.ty.size() || target.size() == 8 {
             return TV { val: tv.val, ty: target.clone() };
         }
+        // To `bool` is not a truncation but a test (6.3.1.2): the result is
+        // `value != 0` — 256 converts to 1, though its low byte is zero. An
+        // `ICmp` result is 0/1 in the full register, already canonical.
+        // (`recanon` bypasses this: an incoming ABI `bool` is re-extended with
+        // `Zext8`, since SysV already guarantees its low byte is 0 or 1.)
+        if *target == CType::Bool {
+            if let Value::Const(c) = tv.val {
+                return TV { val: Value::Const((c != 0) as i64), ty: target.clone() };
+            }
+            let dst = self.new_temp();
+            self.emit(
+                items,
+                InstKind::ICmp {
+                    dst,
+                    pred: IPred::Ne,
+                    lhs: tv.val,
+                    rhs: Value::Const(0),
+                    ty: machine_ty(&tv.ty),
+                },
+                span,
+            );
+            return TV { val: Value::Temp(dst), ty: target.clone() };
+        }
         self.emit_cast(items, tv.val, target, span)
     }
 

@@ -712,8 +712,14 @@ impl Parser {
             TokenKind::StrLit { .. } => {
                 Err(self.error("string literals are not yet supported (TBD)"))
             }
-            TokenKind::Kw(Kw::_true | Kw::_false) => {
-                Err(self.error("`true`/`false` are not yet supported (TBD)"))
+            // `true`/`false` are constants of type `bool`, values 1/0 (6.4.4.6).
+            TokenKind::Kw(kw @ (Kw::_true | Kw::_false)) => {
+                self.consume(1);
+                Ok(Expr {
+                    kind: ExprKind::IntLit { value: (kw == Kw::_true) as u64, ty: CType::Bool },
+                    ty: None,
+                    span: self.spanned(lo),
+                })
             }
             TokenKind::Kw(Kw::nullptr) => Err(self.error("`nullptr` is not yet supported (TBD)")),
             _ => Err(self.error("expected an expression")),
