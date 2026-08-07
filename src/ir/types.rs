@@ -42,8 +42,10 @@ impl Inst {
             | InstKind::ICmp { dst, .. }
             | InstKind::Convert { dst, .. }
             | InstKind::Load { dst, .. }
+            | InstKind::SlotAddr { dst, .. }
+            | InstKind::LoadPtr { dst, .. }
             | InstKind::Call { dst, .. } => Some(*dst),
-            InstKind::Store { .. } => None,
+            InstKind::Store { .. } | InstKind::StorePtr { .. } => None,
         }
     }
 }
@@ -83,6 +85,24 @@ pub enum InstKind {
     // `store <ty> val, $slot` — write a stack slot; defines no register.
     Store {
         slot: SlotId,
+        val: Value,
+        ty: Type,
+    },
+    // `%dst = addr $slot` — the address of a stack slot: pointers into the
+    // frame come from here (the backend's `lea`).
+    SlotAddr {
+        dst: u32,
+        slot: SlotId,
+    },
+    // `%dst = load <ty> [addr]` — a read through a pointer value.
+    LoadPtr {
+        dst: u32,
+        addr: Value,
+        ty: Type,
+    },
+    // `store <ty> val, [addr]` — a write through a pointer value.
+    StorePtr {
+        addr: Value,
         val: Value,
         ty: Type,
     },
@@ -214,6 +234,9 @@ impl fmt::Display for InstKind {
             InstKind::Convert { dst, kind, val } => write!(f, "%{dst} = {kind} {val}"),
             InstKind::Load { dst, slot, ty } => write!(f, "%{dst} = load {ty} {slot}"),
             InstKind::Store { slot, val, ty } => write!(f, "store {ty} {val}, {slot}"),
+            InstKind::SlotAddr { dst, slot } => write!(f, "%{dst} = addr {slot}"),
+            InstKind::LoadPtr { dst, addr, ty } => write!(f, "%{dst} = load {ty} [{addr}]"),
+            InstKind::StorePtr { addr, val, ty } => write!(f, "store {ty} {val}, [{addr}]"),
             InstKind::Call { dst, callee, args, ty } => {
                 write!(f, "%{dst} = call {ty} @{callee}(")?;
                 for (i, a) in args.iter().enumerate() {

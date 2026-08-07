@@ -230,7 +230,7 @@ impl Sema {
                 Ok(())
             }
             StmtKind::Decl { ty, name, init } => {
-                // Current subset: the integer family.
+                // Current subset: the integer family and pointers into it.
                 if !supported_scalar(ty) {
                     return Err(stmt
                         .span
@@ -248,6 +248,8 @@ impl Sema {
                 // `int x = x;` resolves — to the uninitialized `x` — as C says.
                 if let Some(init) = init {
                     self.check_expr(init)?;
+                    // initialization converts as assignment does (6.7.10p12)
+                    check_assign(ty, init)?;
                 }
                 Ok(())
             }
@@ -296,9 +298,15 @@ impl Sema {
                 Ok(())
             }
             StmtKind::Switch { disc, body } => {
-                // The controlling expression is an integer (int in this subset);
+                // The controlling expression must have integer type (6.8.4.2p1);
                 // `case`/`default` inside register against this switch.
                 self.check_expr(disc)?;
+                if !disc.ty.as_ref().expect("just annotated").is_integer() {
+                    return Err(disc
+                        .span
+                        .clone()
+                        .into_error(anyhow!("switch quantity is not an integer")));
+                }
                 self.switches.push(SwitchAcc::default());
                 self.check_stmt(body, ret)?;
                 self.switches.pop();
@@ -374,7 +382,12 @@ impl Sema {
                 // The label name was gathered in the pre-pass; check its statement.
                 self.check_stmt(body, ret)
             }
-            StmtKind::Return(Some(expr)) => self.check_expr(expr),
+            StmtKind::Return(Some(expr)) => {
+                self.check_expr(expr)?;
+                // the value converts to the return type as if by assignment
+                // (6.8.6.4p3), so the same constraint applies
+                check_assign(ret, expr)
+            }
             StmtKind::Return(None) => {
                 // Every modelled function returns `int`, so a bare `return;` has
                 // no value to hand back — diagnose rather than miscompile.
@@ -411,12 +424,26 @@ impl Sema {
                 self.check_expr(cond)?;
                 self.check_expr(then)?;
                 self.check_expr(els)?;
-                // Both arms are arithmetic here, so the result is their common
-                // type under the usual arithmetic conversions (6.5.15p5).
-                CType::usual_arith(
+                let (t, v) = (
                     then.ty.as_ref().expect("just annotated"),
                     els.ty.as_ref().expect("just annotated"),
-                )
+                );
+                // Pointer arms take the one pointer type, with a null pointer
+                // constant absorbed into it; arithmetic arms balance under the
+                // usual arithmetic conversions (6.5.15p5).
+                if t.is_pointer() || v.is_pointer() {
+                    if t == v || (t.is_pointer() && is_npc(els)) {
+                        t.clone()
+                    } else if v.is_pointer() && is_npc(then) {
+                        v.clone()
+                    } else {
+                        return Err(span.into_error(anyhow!(
+                            "type mismatch in conditional expression (`{t}` vs `{v}`)"
+                        )));
+                    }
+                } else {
+                    CType::usual_arith(t, v)
+                }
             }
             ExprKind::Call { callee, args } => {
                 // A name in scope is an object, not a function — it can't be
@@ -431,54 +458,85 @@ impl Sema {
                 };
                 // Arity: exact for a prototyped function; a variadic tail (once
                 // it exists) only relaxes the upper bound.
-                let (nparams, varargs, ret) = (sig.params.len(), sig.varargs, sig.ret.clone());
-                if args.len() < nparams || (!varargs && args.len() > nparams) {
+                let (param_tys, varargs, ret) = (sig.params.clone(), sig.varargs, sig.ret.clone());
+                if args.len() < param_tys.len() || (!varargs && args.len() > param_tys.len()) {
                     return Err(span.into_error(anyhow!(
-                        "`{callee}` takes {nparams} argument(s), but {} given",
+                        "`{callee}` takes {} argument(s), but {} given",
+                        param_tys.len(),
                         args.len()
                     )));
                 }
-                for arg in args {
+                for (arg, pty) in args.iter_mut().zip(&param_tys) {
                     self.check_expr(arg)?;
+                    // each argument converts to its parameter's type as if by
+                    // assignment (6.5.2.2p4), so the same constraint applies
+                    check_assign(pty, arg)?;
                 }
                 ret
             }
             ExprKind::Assign { lhs, rhs } => {
-                // The modifiable-lvalue check (6.5.16): a declared name is the
-                // only lvalue in this subset.
-                if !matches!(lhs.kind, ExprKind::Ident { .. }) {
+                // the modifiable-lvalue check (6.5.16)
+                if !is_lvalue(&lhs.kind) {
                     return Err(span.into_error(anyhow!("left operand of `=` is not assignable")));
                 }
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)?;
-                // the assignment's type is the lhs's (conversions are identity
-                // in the all-`int` subset)
-                lhs.ty.clone().expect("just annotated")
+                // the assignment's type is the lhs's; the rhs must convert to
+                // it as 6.5.16.1p1 permits
+                let lt = lhs.ty.clone().expect("just annotated");
+                check_assign(&lt, rhs)?;
+                lt
             }
             ExprKind::CompoundAssign { lhs, rhs, .. } => {
-                // The same modifiable-lvalue rule as `=` (6.5.16.2); every
-                // compound operator is valid on the all-`int` operands here, so
-                // there is nothing further to constrain per operator.
-                if !matches!(lhs.kind, ExprKind::Ident { .. }) {
+                // The same modifiable-lvalue rule as `=` (6.5.16.2). The target
+                // stays a named object for now: a `*p` target needs the
+                // evaluate-the-lvalue-once desugaring to hold an address.
+                if !is_lvalue(&lhs.kind) {
                     return Err(span.into_error(anyhow!(
                         "left operand of compound assignment is not assignable"
                     )));
                 }
+                if matches!(lhs.kind, ExprKind::Deref { .. }) {
+                    return Err(span.into_error(anyhow!(
+                        "compound assignment through `*` is not yet supported (TBD)"
+                    )));
+                }
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)?;
-                lhs.ty.clone().expect("just annotated")
+                let (l, r) = (
+                    lhs.ty.as_ref().expect("just annotated"),
+                    rhs.ty.as_ref().expect("just annotated"),
+                );
+                // `p += n` is pointer arithmetic — the next batch
+                if l.is_pointer() || r.is_pointer() {
+                    return Err(
+                        span.into_error(anyhow!("pointer arithmetic is not yet supported (TBD)"))
+                    );
+                }
+                l.clone()
             }
             ExprKind::IncDec { expr: inner, .. } => {
-                // `++`/`--` need a modifiable lvalue (6.5.2.4/6.5.3.1); an ident
-                // is the only one in this subset. The result is the operand's
-                // type, whether prefix (new value) or postfix (old).
-                if !matches!(inner.kind, ExprKind::Ident { .. }) {
+                // `++`/`--` need a modifiable lvalue (6.5.2.4/6.5.3.1); like
+                // compound assignment, a `*p` target is TBD. The result is the
+                // operand's type, whether prefix (new value) or postfix (old).
+                if !is_lvalue(&inner.kind) {
                     return Err(
                         span.into_error(anyhow!("operand of `++`/`--` is not a modifiable lvalue"))
                     );
                 }
+                if matches!(inner.kind, ExprKind::Deref { .. }) {
+                    return Err(span
+                        .into_error(anyhow!("`++`/`--` through `*` is not yet supported (TBD)")));
+                }
                 self.check_expr(inner)?;
-                inner.ty.clone().expect("just annotated")
+                let t = inner.ty.clone().expect("just annotated");
+                // `p++` steps by the pointee size — pointer arithmetic, TBD
+                if t.is_pointer() {
+                    return Err(
+                        span.into_error(anyhow!("pointer arithmetic is not yet supported (TBD)"))
+                    );
+                }
+                t
             }
             ExprKind::Comma { lhs, rhs } => {
                 // `lhs` is evaluated and discarded; the result is `rhs` (6.5.17).
@@ -489,18 +547,52 @@ impl Sema {
             ExprKind::Unary { op, expr: inner } => {
                 self.check_expr(inner)?;
                 match op {
-                    // `-x`/`~x` yield the promoted operand type (6.5.3.3);
-                    // `!` yields a 0/1 `int`
+                    // `-x`/`~x` need an arithmetic operand and yield its
+                    // promoted type (6.5.3.3); `!` accepts any scalar (a
+                    // pointer tests against null) and yields a 0/1 `int`
                     UnOp::Neg | UnOp::BitNot => {
-                        inner.ty.as_ref().expect("just annotated").promote()
+                        let t = inner.ty.as_ref().expect("just annotated");
+                        if !t.is_integer() {
+                            return Err(span.into_error(anyhow!(
+                                "wrong type argument (`{t}`) to unary `-`/`~`"
+                            )));
+                        }
+                        t.promote()
                     }
                     UnOp::Not => CType::INT,
                 }
             }
+            ExprKind::AddrOf { expr: inner } => {
+                // `&` needs an lvalue (6.5.3.2p1). `&*p` is fine — the `&`/`*`
+                // pair cancels without an access (p4).
+                if !is_lvalue(&inner.kind) {
+                    return Err(span.into_error(anyhow!("lvalue required as unary `&` operand")));
+                }
+                self.check_expr(inner)?;
+                CType::Ptr(Box::new(inner.ty.clone().expect("just annotated")))
+            }
+            ExprKind::Deref { expr: inner } => {
+                self.check_expr(inner)?;
+                match inner.ty.as_ref().expect("just annotated") {
+                    CType::Ptr(pointee) => (**pointee).clone(),
+                    other => {
+                        return Err(span.into_error(anyhow!(
+                            "invalid type argument of unary `*` (have `{other}`)"
+                        )));
+                    }
+                }
+            }
             ExprKind::Cast { ty, expr: inner } => {
                 self.check_expr(inner)?;
-                // 6.5.4 allows `void` or scalar targets; the current subset is
-                // the integer family (floats, pointers, and `(void)` are TBD).
+                // 6.5.4 allows `void` or scalar targets. Casts *to* a pointer
+                // type stay TBD: a type-punned pointer would break the
+                // 8-byte-slot access model (see hir/build). A pointer *source*
+                // converting to an integer is exact and fine.
+                if ty.is_pointer() {
+                    return Err(span.into_error(anyhow!(
+                        "casts to pointer types are not yet supported (TBD)"
+                    )));
+                }
                 if !supported_scalar(ty) {
                     return Err(
                         span.into_error(anyhow!("cast to `{ty}` is not yet supported (TBD)"))
@@ -515,6 +607,29 @@ impl Sema {
                     lhs.ty.as_ref().expect("just annotated"),
                     rhs.ty.as_ref().expect("just annotated"),
                 );
+                // Pointer operands: same-typed comparisons (equality also
+                // against a null pointer constant, 6.5.9p2) and the
+                // truth-testing `&&`/`||` work; `p + n` et al. are pointer
+                // arithmetic — the next batch.
+                if l.is_pointer() || r.is_pointer() {
+                    let ok = match op {
+                        BinOp::LogAnd | BinOp::LogOr => true,
+                        BinOp::Eq | BinOp::Ne => l == r || is_npc(lhs) || is_npc(rhs),
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => l == r,
+                        _ => {
+                            return Err(span.into_error(anyhow!(
+                                "pointer arithmetic is not yet supported (TBD)"
+                            )));
+                        }
+                    };
+                    if !ok {
+                        return Err(span.into_error(anyhow!(
+                            "comparison of incompatible types `{l}` and `{r}`"
+                        )));
+                    }
+                    expr.ty = Some(CType::INT);
+                    return Ok(());
+                }
                 match op {
                     // arithmetic and bitwise operators: the usual arithmetic
                     // conversions produce the common (result) type (6.3.1.8)
@@ -544,10 +659,51 @@ impl Sema {
 }
 
 /// Is this type in the currently-modelled subset? The full integer family
-/// (`bool`..`long`, both signednesses) is end-to-end; floats are the next
-/// widening.
+/// (`bool`..`long`, both signednesses) and pointers into it, at any depth;
+/// floats and `void *` are the next widenings.
 fn supported_scalar(ty: &CType) -> bool {
-    ty.is_integer()
+    match ty {
+        CType::Ptr(inner) => supported_scalar(inner),
+        _ => ty.is_integer(),
+    }
+}
+
+/// The lvalues of the current subset (6.5.1): a named object or a
+/// dereference. Parenthesised forms already collapsed in the parser.
+fn is_lvalue(kind: &ExprKind) -> bool {
+    matches!(kind, ExprKind::Ident { .. } | ExprKind::Deref { .. })
+}
+
+/// A null pointer constant (6.3.2.3p3): an integer constant expression with
+/// value 0. (The `(void *)0` spelling waits on `void *` itself.)
+fn is_npc(e: &Expr) -> bool {
+    e.ty.as_ref().is_some_and(CType::is_integer) && const_eval_int(e) == Some(0)
+}
+
+/// The simple-assignment constraint (6.5.16.1p1) for the pointer-involving
+/// cases; arithmetic-to-arithmetic is always implicitly convertible and
+/// passes through. Applied wherever conversion-as-if-by-assignment happens:
+/// `=`, initializers, `return`, and call arguments. Erroring (not warning)
+/// on the mismatches matches GCC 14+, where C23 hardened these.
+fn check_assign(dst: &CType, src: &Expr) -> Result<()> {
+    let sty = src.ty.as_ref().expect("operand checked before conversion");
+    let ok = match (dst, sty) {
+        (CType::Ptr(_), CType::Ptr(_)) => dst == sty,
+        // a null pointer constant converts to any pointer type (6.3.2.3p3)
+        (CType::Ptr(_), _) => is_npc(src),
+        // a pointer assigns to `bool` (the `!= 0` test) but no other integer
+        (CType::Bool, CType::Ptr(_)) => true,
+        (_, CType::Ptr(_)) => false,
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(src
+            .span
+            .clone()
+            .into_error(anyhow!("incompatible types assigning `{sty}` to `{dst}`")))
+    }
 }
 
 /// Fold an integer constant expression (6.6) to its value, or `None` if it is

@@ -177,8 +177,10 @@ impl Checker<'_> {
             | InstKind::ICmp { dst, .. }
             | InstKind::Convert { dst, .. }
             | InstKind::LoadLocal { dst, .. }
+            | InstKind::AddrLocal { dst, .. }
+            | InstKind::LoadPtr { dst, .. }
             | InstKind::Call { dst, .. } => self.define(*dst),
-            InstKind::StoreLocal { .. } => Ok(()),
+            InstKind::StoreLocal { .. } | InstKind::StorePtr { .. } => Ok(()),
         }
     }
 
@@ -214,19 +216,27 @@ impl Checker<'_> {
 fn inst_uses(kind: &InstKind) -> Vec<&Value> {
     match kind {
         InstKind::IBin { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => vec![lhs, rhs],
-        InstKind::Convert { val, .. } | InstKind::StoreLocal { val, .. } => vec![val],
-        InstKind::LoadLocal { .. } => vec![],
+        InstKind::Convert { val, .. }
+        | InstKind::StoreLocal { val, .. }
+        | InstKind::LoadPtr { addr: val, .. } => vec![val],
+        InstKind::StorePtr { addr, val, .. } => vec![addr, val],
+        InstKind::LoadLocal { .. } | InstKind::AddrLocal { .. } => vec![],
         InstKind::Call { args, .. } => args.iter().collect(),
     }
 }
 
 // The local an instruction touches, if any. Exhaustive for the same reason.
+// (`LoadPtr`/`StorePtr` reach memory through a value, not a local reference.)
 fn inst_local(kind: &InstKind) -> Option<LocalId> {
     match kind {
-        InstKind::LoadLocal { local, .. } | InstKind::StoreLocal { local, .. } => Some(*local),
+        InstKind::LoadLocal { local, .. }
+        | InstKind::StoreLocal { local, .. }
+        | InstKind::AddrLocal { local, .. } => Some(*local),
         InstKind::IBin { .. }
         | InstKind::ICmp { .. }
         | InstKind::Convert { .. }
+        | InstKind::LoadPtr { .. }
+        | InstKind::StorePtr { .. }
         | InstKind::Call { .. } => None,
     }
 }
@@ -349,6 +359,46 @@ mod tests {
     #[test]
     fn rejects_goto_missing_label() {
         let body = block(0, vec![Item::Goto(LabelId(0))]);
+        assert!(verify(&func(0, body)).is_err());
+    }
+
+    #[test]
+    fn accepts_ptr_roundtrip() {
+        // $0's address flows through %0; the store and load through it are uses.
+        let addr = InstKind::AddrLocal { dst: TempId(0), local: LocalId(0) };
+        let store = InstKind::StorePtr {
+            addr: Value::Temp(TempId(0)),
+            val: Value::Const(7),
+            ty: Type::I32,
+            volatile: false,
+        };
+        let load = InstKind::LoadPtr {
+            dst: TempId(1),
+            addr: Value::Temp(TempId(0)),
+            ty: Type::I32,
+            volatile: false,
+        };
+        let body = block(
+            0,
+            vec![
+                Item::Inst(Inst { kind: addr, span: span() }),
+                Item::Inst(Inst { kind: store, span: span() }),
+                Item::Inst(Inst { kind: load, span: span() }),
+                Item::Ret(Some(Value::Temp(TempId(1)))),
+            ],
+        );
+        assert!(verify(&func(1, body)).is_ok());
+    }
+
+    #[test]
+    fn rejects_load_through_undefined_addr() {
+        let load = InstKind::LoadPtr {
+            dst: TempId(0),
+            addr: Value::Temp(TempId(3)),
+            ty: Type::I32,
+            volatile: false,
+        };
+        let body = block(0, vec![Item::Inst(Inst { kind: load, span: span() })]);
         assert!(verify(&func(0, body)).is_err());
     }
 

@@ -335,6 +335,15 @@ impl Elab {
             hir::InstKind::StoreLocal { local, val, ty, .. } => {
                 InstKind::Store { slot: SlotId(local.0), val: value(val), ty: *ty }
             }
+            hir::InstKind::AddrLocal { dst, local } => {
+                InstKind::SlotAddr { dst: dst.0, slot: SlotId(local.0) }
+            }
+            hir::InstKind::LoadPtr { dst, addr, ty, .. } => {
+                InstKind::LoadPtr { dst: dst.0, addr: value(addr), ty: *ty }
+            }
+            hir::InstKind::StorePtr { addr, val, ty, .. } => {
+                InstKind::StorePtr { addr: value(addr), val: value(val), ty: *ty }
+            }
             hir::InstKind::Call { dst, callee, args, ty } => InstKind::Call {
                 dst: dst.0,
                 callee: callee.clone(),

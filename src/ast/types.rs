@@ -69,6 +69,10 @@ impl CType {
         matches!(self, CType::Float | CType::Double)
     }
 
+    pub fn is_pointer(&self) -> bool {
+        matches!(self, CType::Ptr(_))
+    }
+
     pub fn is_arith(&self) -> bool {
         self.is_integer() || self.is_float()
     }
@@ -290,6 +294,11 @@ pub enum ExprKind {
     // `(ty) expr` — an explicit conversion (6.5.4); lowering feeds it through
     // the same conversion engine as the implicit ones.
     Cast { ty: CType, expr: Box<Expr> },
+    // `&expr` — the address of an lvalue (6.5.3.2); typed pointer-to-operand.
+    AddrOf { expr: Box<Expr> },
+    // `*expr` — dereference (6.5.3.2): an lvalue designating the pointed-to
+    // object; reads load through the pointer, assignment stores through it.
+    Deref { expr: Box<Expr> },
 }
 
 /// Binary operators (FE-19). The full set is defined; only `+ - * / %` are
@@ -316,9 +325,8 @@ pub enum BinOp {
     LogOr,
 }
 
-/// Prefix operators that fold into a `Unary` node (FE-19). `Neg` is wired;
-/// `Not`/`BitNot` parse but are TBD in sema. `*`/`&`/`++`/`--` are distinct
-/// node kinds (not yet in this subset), so they TBD in the parser.
+/// Prefix operators that fold into a `Unary` node (FE-19). `*`/`&`/`++`/`--`
+/// are distinct node kinds (`Deref`/`AddrOf`/`IncDec`), not `UnOp`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,

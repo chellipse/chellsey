@@ -86,19 +86,27 @@ fn check_use(v: &Value, defined: &HashSet<u32>) -> Result<(), String> {
 fn inst_uses(kind: &InstKind) -> Vec<&Value> {
     match kind {
         InstKind::IBin { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => vec![lhs, rhs],
-        InstKind::Convert { val, .. } | InstKind::Store { val, .. } => vec![val],
-        InstKind::Load { .. } => vec![],
+        InstKind::Convert { val, .. }
+        | InstKind::Store { val, .. }
+        | InstKind::LoadPtr { addr: val, .. } => vec![val],
+        InstKind::StorePtr { addr, val, .. } => vec![addr, val],
+        InstKind::Load { .. } | InstKind::SlotAddr { .. } => vec![],
         InstKind::Call { args, .. } => args.iter().collect(),
     }
 }
 
 // The stack slot an instruction touches, if any. Exhaustive for the same reason.
+// (`LoadPtr`/`StorePtr` reach memory through a value, not a slot reference.)
 fn inst_slot(kind: &InstKind) -> Option<SlotId> {
     match kind {
-        InstKind::Load { slot, .. } | InstKind::Store { slot, .. } => Some(*slot),
+        InstKind::Load { slot, .. }
+        | InstKind::Store { slot, .. }
+        | InstKind::SlotAddr { slot, .. } => Some(*slot),
         InstKind::IBin { .. }
         | InstKind::ICmp { .. }
         | InstKind::Convert { .. }
+        | InstKind::LoadPtr { .. }
+        | InstKind::StorePtr { .. }
         | InstKind::Call { .. } => None,
     }
 }

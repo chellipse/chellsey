@@ -73,8 +73,10 @@ impl Inst {
             | InstKind::ICmp { dst, .. }
             | InstKind::Convert { dst, .. }
             | InstKind::LoadLocal { dst, .. }
+            | InstKind::AddrLocal { dst, .. }
+            | InstKind::LoadPtr { dst, .. }
             | InstKind::Call { dst, .. } => Some(*dst),
-            InstKind::StoreLocal { .. } => None,
+            InstKind::StoreLocal { .. } | InstKind::StorePtr { .. } => None,
         }
     }
 }
@@ -83,11 +85,12 @@ impl InstKind {
     #[allow(dead_code)]
     pub fn effect(&self) -> Effect {
         match self {
-            InstKind::IBin { .. } | InstKind::ICmp { .. } | InstKind::Convert { .. } => {
-                Effect::Pure
-            }
-            InstKind::LoadLocal { .. } => Effect::Read,
-            InstKind::StoreLocal { .. } => Effect::Write,
+            InstKind::IBin { .. }
+            | InstKind::ICmp { .. }
+            | InstKind::Convert { .. }
+            | InstKind::AddrLocal { .. } => Effect::Pure,
+            InstKind::LoadLocal { .. } | InstKind::LoadPtr { .. } => Effect::Read,
+            InstKind::StoreLocal { .. } | InstKind::StorePtr { .. } => Effect::Write,
             InstKind::Call { .. } => Effect::Opaque,
         }
     }
@@ -131,6 +134,26 @@ pub enum InstKind {
     // `store <ty> val, $local` — every store is explicit; defines no temp.
     StoreLocal {
         local: LocalId,
+        val: Value,
+        ty: Type,
+        volatile: bool,
+    },
+    // `%dst = addr $local` — the address of a local's slot: the pure value
+    // behind `&x` (its emission marks the local address-taken).
+    AddrLocal {
+        dst: TempId,
+        local: LocalId,
+    },
+    // `%dst = load <ty> [addr]` — a read through a pointer value.
+    LoadPtr {
+        dst: TempId,
+        addr: Value,
+        ty: Type,
+        volatile: bool,
+    },
+    // `store <ty> val, [addr]` — a write through a pointer value.
+    StorePtr {
+        addr: Value,
         val: Value,
         ty: Type,
         volatile: bool,
@@ -351,6 +374,15 @@ impl fmt::Display for InstKind {
             InstKind::StoreLocal { local, val, ty, volatile } => {
                 let v = if *volatile { "volatile " } else { "" };
                 write!(f, "store {v}{ty} {val}, {local}")
+            }
+            InstKind::AddrLocal { dst, local } => write!(f, "{dst} = addr {local}"),
+            InstKind::LoadPtr { dst, addr, ty, volatile } => {
+                let v = if *volatile { "volatile " } else { "" };
+                write!(f, "{dst} = load {v}{ty} [{addr}]")
+            }
+            InstKind::StorePtr { addr, val, ty, volatile } => {
+                let v = if *volatile { "volatile " } else { "" };
+                write!(f, "store {v}{ty} {val}, [{addr}]")
             }
             InstKind::Call { dst, callee, args, ty } => {
                 write!(f, "{dst} = call {ty} @{callee}(")?;

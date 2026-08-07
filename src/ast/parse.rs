@@ -100,12 +100,13 @@ impl Parser {
     // ----- external declarations (FE-15) -----------------------------------
 
     /// A function definition (`ret f(params) { ... }`) or a function prototype
-    /// (`ret f(params);`). File-scope variables, pointers, arrays, and real
-    /// parameters are later items and diagnose as TBD here.
+    /// (`ret f(params);`). File-scope variables and array declarators are
+    /// later items and diagnose as TBD here.
     fn parse_ext_decl(&mut self) -> Result<ExtDecl> {
         let lo = self.cursor;
 
         let ret = self.parse_type_specifiers()?;
+        let ret = self.eat_ptr_stars(ret);
         let ident = self.parse_ident()?;
 
         // The v1 declarator is just `ident (params)`. Anything not immediately
@@ -211,6 +212,17 @@ impl Parser {
         Ok(ty)
     }
 
+    /// Wrap `ty` in one `Ptr` per `*` — the pointer part of a declarator
+    /// (6.7.6.1). The `*`s belong to each declarator, not the specifiers
+    /// (`int *a, b` makes one pointer); with declarator lists TBD, calling
+    /// this where each single declarator parses draws the same line.
+    fn eat_ptr_stars(&mut self, mut ty: CType) -> CType {
+        while self.eat(TokenKind::Punct(Punct::Star)) {
+            ty = CType::Ptr(Box::new(ty));
+        }
+        ty
+    }
+
     fn parse_ident(&mut self) -> Result<String> {
         let tok = self.peek()?;
         let TokenKind::Ident { value } = &tok.kind else {
@@ -223,7 +235,7 @@ impl Parser {
 
     /// A parameter list: `()`, `(void)`, or comma-separated `type [ident]`
     /// declarations (the name is optional in a prototype; sema requires it in
-    /// a definition). Varargs `...` and pointer/array declarators are TBD.
+    /// a definition). Varargs `...` and array declarators are TBD.
     /// Returns `(params, varargs)`.
     fn parse_params(&mut self) -> Result<(Vec<Param>, bool)> {
         self.consume_expect(TokenKind::Punct(Punct::LParen))?;
@@ -250,6 +262,7 @@ impl Parser {
             }
             let lo = self.cursor;
             let ty = self.parse_type_specifiers()?;
+            let ty = self.eat_ptr_stars(ty);
             let name = if matches!(self.peek()?.kind, TokenKind::Ident { .. }) {
                 Some(self.parse_ident()?)
             } else {
@@ -277,11 +290,12 @@ impl Parser {
     }
 
     /// `ty ident [= init] ;` — a single declarator with an optional
-    /// initializer. Declarator lists (`int a, b;`), pointer/array declarators,
-    /// and local function declarations are FE-16's widening and TBD here.
+    /// initializer. Declarator lists (`int a, b;`), array declarators, and
+    /// local function declarations are FE-16's widening and TBD here.
     fn parse_decl(&mut self) -> Result<Stmt> {
         let lo = self.cursor;
         let ty = self.parse_type_specifiers()?;
+        let ty = self.eat_ptr_stars(ty);
         let name = self.parse_ident()?;
         // an initializer is an assignment-expression (6.7.10) — `,` stays out
         let init = if self.eat(TokenKind::Punct(Punct::Eq)) {
@@ -585,6 +599,7 @@ impl Parser {
             let lo = self.cursor;
             self.consume(1);
             let ty = self.parse_type_specifiers()?;
+            let ty = self.eat_ptr_stars(ty);
             self.consume_expect(TokenKind::Punct(Punct::RParen))?;
             let expr = self.parse_cast_expr()?;
             return Ok(Expr {
@@ -597,7 +612,8 @@ impl Parser {
     }
 
     /// `parse_unary` — prefix `- ! ~` fold into `Unary`; unary `+` is identity;
-    /// prefix `++`/`--` build an `IncDec`; `* &` and `sizeof` are TBD here.
+    /// prefix `++`/`--` build an `IncDec`; `*`/`&` build `Deref`/`AddrOf`
+    /// (their operand is a cast-expression, 6.5.3); `sizeof` is TBD here.
     fn parse_unary(&mut self) -> Result<Expr> {
         let lo = self.cursor;
         // prefix `++`/`--`: the operand is a unary-expression (6.5.3), and the
@@ -620,8 +636,17 @@ impl Parser {
                 self.consume(1);
                 return self.parse_cast_expr();
             }
-            TokenKind::Punct(Punct::Star) | TokenKind::Punct(Punct::Amp) => {
-                return Err(self.error("this prefix operator is not yet supported (TBD)"));
+            TokenKind::Punct(Punct::Star) => {
+                self.consume(1);
+                let expr = self.parse_cast_expr()?;
+                let kind = ExprKind::Deref { expr: Box::new(expr) };
+                return Ok(Expr { kind, ty: None, span: self.spanned(lo) });
+            }
+            TokenKind::Punct(Punct::Amp) => {
+                self.consume(1);
+                let expr = self.parse_cast_expr()?;
+                let kind = ExprKind::AddrOf { expr: Box::new(expr) };
+                return Ok(Expr { kind, ty: None, span: self.spanned(lo) });
             }
             TokenKind::Kw(Kw::sizeof) => {
                 return Err(self.error("`sizeof` is not yet supported (TBD)"));

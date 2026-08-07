@@ -271,6 +271,12 @@ enum MInst {
     Load { dst: Gpr, disp: i32 },
     // `mov [rbp+disp], r64` (store a spill slot)
     Store { disp: i32, src: Gpr },
+    // `lea dst, [rbp+disp]` — materialize a frame address.
+    Lea { dst: Gpr, disp: i32 },
+    // `mov dst, [addr]` — load through a register-held address.
+    LoadInd { dst: Gpr, addr: Gpr },
+    // `mov [addr], src` — store through a register-held address.
+    StoreInd { addr: Gpr, src: Gpr },
     // `<op> dst, src` — reg/reg ALU.
     Alu { op: AluOp, dst: Gpr, src: Gpr },
     // `imul dst, src` (0F AF)
@@ -493,6 +499,28 @@ impl<'a> FuncSel<'a> {
                 code.push(MInst::Store { disp: self.local(*slot), src: Gpr::Rax });
                 Ok(())
             }
+            // A slot's address (the LeaRbp arm ME-8 reserved).
+            InstKind::SlotAddr { dst, slot } => {
+                code.push(MInst::Lea { dst: Gpr::Rax, disp: self.local(*slot) });
+                code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
+                Ok(())
+            }
+            // Access through a pointer is a full 8-byte access: every
+            // addressable object in this subset is a scalar local whose slot
+            // holds its canonical 64-bit form, so the width is the slot's,
+            // not the pointee's. Sized accesses arrive with arrays/globals.
+            InstKind::LoadPtr { dst, addr, .. } => {
+                self.load(addr, Gpr::Rcx, code)?;
+                code.push(MInst::LoadInd { dst: Gpr::Rax, addr: Gpr::Rcx });
+                code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
+                Ok(())
+            }
+            InstKind::StorePtr { addr, val, .. } => {
+                self.load(val, Gpr::Rax, code)?;
+                self.load(addr, Gpr::Rcx, code)?;
+                code.push(MInst::StoreInd { addr: Gpr::Rcx, src: Gpr::Rax });
+                Ok(())
+            }
             // A direct call (SysV): materialize each argument into its argument
             // register, `call`, then take the result from rax. The frame is
             // 16-byte aligned (FuncSel::new), so rsp is aligned at the call as
@@ -636,6 +664,33 @@ impl Encoder {
                 self.b(0x89);
                 self.mem_rbp(src.code(), disp);
             }
+            MInst::Lea { dst, disp } => {
+                // lea r64, [rbp+disp] : 48 8D /r
+                self.rex_w(dst.code(), Gpr::Rbp.code());
+                self.b(0x8D);
+                self.mem_rbp(dst.code(), disp);
+            }
+            MInst::LoadInd { dst, addr } => {
+                // mov r64, [addr] : 48 8B /r, mod=00. rm=100/101 escape to the
+                // SIB/RIP forms; the selector only holds addresses in rcx.
+                assert!(
+                    addr.code() & 7 != 4 && addr.code() & 7 != 5,
+                    "plain [reg] operand"
+                );
+                self.rex_w(dst.code(), addr.code());
+                self.b(0x8B);
+                self.modrm(0b00, dst.code(), addr.code());
+            }
+            MInst::StoreInd { addr, src } => {
+                // mov [addr], r64 : 48 89 /r, mod=00 (same rm caveat as LoadInd).
+                assert!(
+                    addr.code() & 7 != 4 && addr.code() & 7 != 5,
+                    "plain [reg] operand"
+                );
+                self.rex_w(src.code(), addr.code());
+                self.b(0x89);
+                self.modrm(0b00, src.code(), addr.code());
+            }
             MInst::Alu { op, dst, src } => {
                 // OP r/m64, r64 : 48 <op> /r, reg=src, rm=dst, mod=11
                 self.rex_w(src.code(), dst.code());
@@ -778,6 +833,9 @@ fn asm(inst: MInst) -> String {
         MInst::MovRImm { dst, imm } => format!("mov {}, {imm}", dst.name()),
         MInst::Load { dst, disp } => format!("mov {}, [rbp{disp:+}]", dst.name()),
         MInst::Store { disp, src } => format!("mov [rbp{disp:+}], {}", src.name()),
+        MInst::Lea { dst, disp } => format!("lea {}, [rbp{disp:+}]", dst.name()),
+        MInst::LoadInd { dst, addr } => format!("mov {}, [{}]", dst.name(), addr.name()),
+        MInst::StoreInd { addr, src } => format!("mov [{}], {}", addr.name(), src.name()),
         MInst::Alu { op, dst, src } => format!("{} {}, {}", op.name(), dst.name(), src.name()),
         MInst::IMul { dst, src } => format!("imul {}, {}", dst.name(), src.name()),
         MInst::Cqo => "cqo".to_string(),

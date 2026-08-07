@@ -689,22 +689,73 @@ impl<'a> FnGen<'a> {
                 let dst = self.load(items, join, machine_ty(&ty), &e.span);
                 Ok(TV { val: Value::Temp(dst), ty })
             }
-            // `lhs = rhs`: evaluate the rhs, store it to the lvalue's local;
-            // the assignment's own value is the value stored (6.5.16.1).
+            // `lhs = rhs`: evaluate the rhs, store it through the lvalue; the
+            // assignment's own value is the *converted* value stored, not the
+            // rhs (6.5.16.1p2).
             ExprKind::Assign { lhs, rhs } => {
                 let v = self.expr(items, rhs)?;
-                let ExprKind::Ident { name } = &lhs.kind else {
-                    return Err(err(
-                        &lhs.span,
-                        "internal: non-lvalue assignment target past sema",
-                    ));
-                };
-                let local = self.lookup(name);
-                // the rhs converts to the lvalue's type, and that converted
-                // value — not the rhs — is the expression's value (6.5.16.1p2)
                 let v = self.convert(items, v, &ty, &e.span);
-                self.store(items, local, v.val, machine_ty(&ty), &e.span);
+                match &lhs.kind {
+                    ExprKind::Ident { name } => {
+                        let local = self.lookup(name);
+                        self.store(items, local, v.val, machine_ty(&ty), &e.span);
+                    }
+                    // `*p = v`: evaluate the pointer, store through it
+                    ExprKind::Deref { expr: p } => {
+                        let addr = self.expr(items, p)?;
+                        self.emit(
+                            items,
+                            InstKind::StorePtr {
+                                addr: addr.val,
+                                val: v.val,
+                                ty: machine_ty(&ty),
+                                volatile: false,
+                            },
+                            &e.span,
+                        );
+                    }
+                    _ => {
+                        return Err(err(
+                            &lhs.span,
+                            "internal: non-lvalue assignment target past sema",
+                        ));
+                    }
+                }
                 Ok(TV { val: v.val, ty })
+            }
+            // `&x` (6.5.3.2): the address of the named object's slot. `&*p`
+            // cancels to evaluating `p` itself — no access occurs (p4).
+            ExprKind::AddrOf { expr: inner } => match &inner.kind {
+                ExprKind::Ident { name } => {
+                    let local = self.lookup(name);
+                    self.locals[local.0 as usize].addr_taken = true;
+                    let dst = self.new_temp();
+                    self.emit(items, InstKind::AddrLocal { dst, local }, &e.span);
+                    Ok(TV { val: Value::Temp(dst), ty })
+                }
+                ExprKind::Deref { expr: p } => {
+                    let tv = self.expr(items, p)?;
+                    Ok(TV { val: tv.val, ty })
+                }
+                _ => Err(err(
+                    &inner.span,
+                    "internal: non-lvalue `&` operand past sema",
+                )),
+            },
+            // `*p` as an rvalue: evaluate the pointer, load through it. The
+            // load is full-width and needs no re-extension: every addressable
+            // object in this subset is a scalar local whose 8-byte slot holds
+            // the canonical form (§2.3), so what comes back is already
+            // canonical for `ty`. Sized accesses arrive with arrays/globals.
+            ExprKind::Deref { expr: p } => {
+                let addr = self.expr(items, p)?;
+                let dst = self.new_temp();
+                self.emit(
+                    items,
+                    InstKind::LoadPtr { dst, addr: addr.val, ty: machine_ty(&ty), volatile: false },
+                    &e.span,
+                );
+                Ok(TV { val: Value::Temp(dst), ty })
             }
             // `lhs op= rhs` (6.5.16.2): load the lvalue once, combine it with
             // the rhs under `op` *in the common computation type*, convert the
@@ -904,7 +955,17 @@ impl<'a> FnGen<'a> {
                 // `icmp` whose predicate signedness is the *common* type's,
                 // not the result's (`ty` here is the outer int).
                 if is_comparison(*op) {
-                    let common = CType::usual_arith(&l.ty, &r.ty);
+                    // Pointers don't balance under UAC: the common type is the
+                    // pointer type itself (the other side, if integer, is a
+                    // null pointer constant — sema checked), and `is_signed`
+                    // on a pointer is false, so the compare is unsigned.
+                    let common = if l.ty.is_pointer() {
+                        l.ty.clone()
+                    } else if r.ty.is_pointer() {
+                        r.ty.clone()
+                    } else {
+                        CType::usual_arith(&l.ty, &r.ty)
+                    };
                     let l = self.convert(items, l, &common, &e.span);
                     let r = self.convert(items, r, &common, &e.span);
                     let pred = int_pred(*op, common.is_signed()).expect("just classified");
@@ -964,7 +1025,7 @@ fn machine_ty(ct: &CType) -> Type {
         CType::Long { .. } => Type::I64,
         CType::Float => Type::F32,
         CType::Double => Type::F64,
-        // arrays decay to a pointer; neither is lowered further yet (ME-8).
+        // arrays decay to a pointer (their own objects are a later ME-8 batch)
         CType::Ptr(_) | CType::Array(..) => Type::Ptr,
     }
 }
