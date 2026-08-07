@@ -75,6 +75,21 @@ impl Gpr {
         }
     }
 
+    /// The 16-bit register name, for `movsx`/`movzx` textual output.
+    fn name16(self) -> &'static str {
+        match self {
+            Gpr::Rax => "ax",
+            Gpr::Rcx => "cx",
+            Gpr::Rdx => "dx",
+            Gpr::Rsp => "sp",
+            Gpr::Rbp => "bp",
+            Gpr::Rsi => "si",
+            Gpr::Rdi => "di",
+            Gpr::R8 => "r8w",
+            Gpr::R9 => "r9w",
+        }
+    }
+
     /// The 32-bit register name, for `movsxd` textual output.
     fn name32(self) -> &'static str {
         match self {
@@ -272,6 +287,12 @@ enum MInst {
     SetCC { cc: Cc, dst: Gpr },
     // `movzx dst, dst_l` (0F B6 /r) — zero-extend `dst`'s low byte into `dst`.
     Movzx8 { dst: Gpr },
+    // `movsx dst, dst_l` (0F BE /r) — sign-extend `dst`'s low byte into `dst`.
+    Movsx8 { dst: Gpr },
+    // `movzx dst, dst_w` (0F B7 /r) — zero-extend `dst`'s low word into `dst`.
+    Movzx16 { dst: Gpr },
+    // `movsx dst, dst_w` (0F BF /r) — sign-extend `dst`'s low word into `dst`.
+    Movsx16 { dst: Gpr },
     // `movsxd dst, src_32` (63 /r) — sign-extend `src`'s low dword into `dst`.
     Movsxd { dst: Gpr, src: Gpr },
     // `mov dst_32, src_32` (89 /r, no REX.W) — a 32-bit register write
@@ -445,23 +466,18 @@ impl<'a> FuncSel<'a> {
                 code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
                 Ok(())
             }
-            // A re-extension of rax's low bits (ME-4 / BE-5). The sub-dword
-            // kinds arrive with `char`/`short` locals.
+            // A re-extension of rax's low bits (ME-4 / BE-5): one sign- or
+            // zero-extension instruction per `CastKind` width.
             InstKind::Convert { dst, kind, val } => {
                 self.load(val, Gpr::Rax, code)?;
-                match kind {
-                    ir::CastKind::Sext32 => {
-                        code.push(MInst::Movsxd { dst: Gpr::Rax, src: Gpr::Rax });
-                    }
-                    ir::CastKind::Zext32 => {
-                        code.push(MInst::MovR32 { dst: Gpr::Rax, src: Gpr::Rax });
-                    }
-                    _ => {
-                        return Err(inst.span.clone().into_error(anyhow!(
-                            "this conversion is not yet supported in codegen (TBD)"
-                        )));
-                    }
-                }
+                code.push(match kind {
+                    ir::CastKind::Sext8 => MInst::Movsx8 { dst: Gpr::Rax },
+                    ir::CastKind::Zext8 => MInst::Movzx8 { dst: Gpr::Rax },
+                    ir::CastKind::Sext16 => MInst::Movsx16 { dst: Gpr::Rax },
+                    ir::CastKind::Zext16 => MInst::Movzx16 { dst: Gpr::Rax },
+                    ir::CastKind::Sext32 => MInst::Movsxd { dst: Gpr::Rax, src: Gpr::Rax },
+                    ir::CastKind::Zext32 => MInst::MovR32 { dst: Gpr::Rax, src: Gpr::Rax },
+                });
                 code.push(MInst::Store { disp: spill(*dst), src: Gpr::Rax });
                 Ok(())
             }
@@ -669,6 +685,27 @@ impl Encoder {
                 self.b(0xB6);
                 self.modrm(0b11, dst.code(), dst.code());
             }
+            MInst::Movsx8 { dst } => {
+                // movsx r64, r/m8 : 48 0F BE /r
+                self.rex_w(dst.code(), dst.code());
+                self.b(0x0F);
+                self.b(0xBE);
+                self.modrm(0b11, dst.code(), dst.code());
+            }
+            MInst::Movzx16 { dst } => {
+                // movzx r64, r/m16 : 48 0F B7 /r
+                self.rex_w(dst.code(), dst.code());
+                self.b(0x0F);
+                self.b(0xB7);
+                self.modrm(0b11, dst.code(), dst.code());
+            }
+            MInst::Movsx16 { dst } => {
+                // movsx r64, r/m16 : 48 0F BF /r
+                self.rex_w(dst.code(), dst.code());
+                self.b(0x0F);
+                self.b(0xBF);
+                self.modrm(0b11, dst.code(), dst.code());
+            }
             MInst::Movsxd { dst, src } => {
                 // movsxd r64, r/m32 : 48 63 /r, reg=dst, rm=src
                 self.rex_w(dst.code(), src.code());
@@ -749,6 +786,9 @@ fn asm(inst: MInst) -> String {
         MInst::Shift { op, dst } => format!("{} {}, cl", op.name(), dst.name()),
         MInst::SetCC { cc, dst } => format!("set{} {}", cc.name(), dst.name8()),
         MInst::Movzx8 { dst } => format!("movzx {}, {}", dst.name(), dst.name8()),
+        MInst::Movsx8 { dst } => format!("movsx {}, {}", dst.name(), dst.name8()),
+        MInst::Movzx16 { dst } => format!("movzx {}, {}", dst.name(), dst.name16()),
+        MInst::Movsx16 { dst } => format!("movsx {}, {}", dst.name(), dst.name16()),
         MInst::Movsxd { dst, src } => format!("movsxd {}, {}", dst.name(), src.name32()),
         MInst::MovR32 { dst, src } => format!("mov {}, {}", dst.name32(), src.name32()),
         MInst::Label(n) => format!("bb{n}:"),

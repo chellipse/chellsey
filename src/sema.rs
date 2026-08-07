@@ -97,8 +97,8 @@ impl Sema {
             }
         };
 
-        // Current subset: the `int`/`long` family (both signednesses). The
-        // sub-`int` types and floats are the next widenings (TBD).
+        // Current subset: the `char`..`long` integer family (both
+        // signednesses). `bool` and floats are the next widenings (TBD).
         if !supported_scalar(ret) {
             return Err(decl
                 .span
@@ -230,7 +230,7 @@ impl Sema {
                 Ok(())
             }
             StmtKind::Decl { ty, name, init } => {
-                // Current subset: the `int`/`long` family (both signednesses).
+                // Current subset: the `char`..`long` integer family.
                 if !supported_scalar(ty) {
                     return Err(stmt
                         .span
@@ -532,11 +532,14 @@ impl Sema {
     }
 }
 
-/// Is this type in the currently-modelled subset? The `int`/`long` family
-/// (both signednesses) is end-to-end; `bool`/`char`/`short` and floats are the
-/// next widenings.
+/// Is this type in the currently-modelled subset? The `char`..`long` integer
+/// family (both signednesses) is end-to-end; `bool` (whose conversion is
+/// `!= 0`, not a truncation) and floats are the next widenings.
 fn supported_scalar(ty: &CType) -> bool {
-    matches!(ty, CType::Int { .. } | CType::Long { .. })
+    matches!(
+        ty,
+        CType::Char { .. } | CType::Short { .. } | CType::Int { .. } | CType::Long { .. }
+    )
 }
 
 /// Fold an integer constant expression (6.6) to its value, or `None` if it is
