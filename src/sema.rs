@@ -497,6 +497,17 @@ impl Sema {
                     UnOp::Not => CType::INT,
                 }
             }
+            ExprKind::Cast { ty, expr: inner } => {
+                self.check_expr(inner)?;
+                // 6.5.4 allows `void` or scalar targets; the current subset is
+                // the integer family (floats, pointers, and `(void)` are TBD).
+                if !supported_scalar(ty) {
+                    return Err(
+                        span.into_error(anyhow!("cast to `{ty}` is not yet supported (TBD)"))
+                    );
+                }
+                ty.clone()
+            }
             ExprKind::Binary { op, lhs, rhs } => {
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)?;

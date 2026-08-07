@@ -651,6 +651,11 @@ impl<'a> FnGen<'a> {
             ExprKind::IntLit { value, ty: lit_ty } => {
                 Ok(TV { val: Value::Const(*value as i64), ty: lit_ty.clone() })
             }
+            // an explicit conversion is the implicit machinery, spelled out
+            ExprKind::Cast { ty: target, expr: inner } => {
+                let tv = self.expr(items, inner)?;
+                Ok(self.convert(items, tv, target, &e.span))
+            }
             // a variable read: an explicit lvalue-to-rvalue load (HIR-EXP-2)
             ExprKind::Ident { name } => {
                 let local = self.lookup(name);

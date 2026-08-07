@@ -574,13 +574,24 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// `parse_cast_expr` — `(type) expr` casts are TBD; disambiguated from a
-    /// parenthesised expression by peeking past the `(` for a type specifier.
+    /// `parse_cast_expr` — `(type) expr`, disambiguated from a parenthesised
+    /// expression by peeking past the `(` for a type specifier (no typedefs
+    /// yet, so a keyword decides). The operand is itself a cast-expression
+    /// (6.5.4), so `(long)(int)x` nests and `(int)x + y` binds only `x`.
     fn parse_cast_expr(&mut self) -> Result<Expr> {
         if self.at(TokenKind::Punct(Punct::LParen))
             && self.peek2().is_some_and(|tok| is_type_start(&tok.kind))
         {
-            return Err(self.error("cast expressions are not yet supported (TBD)"));
+            let lo = self.cursor;
+            self.consume(1);
+            let ty = self.parse_type_specifiers()?;
+            self.consume_expect(TokenKind::Punct(Punct::RParen))?;
+            let expr = self.parse_cast_expr()?;
+            return Ok(Expr {
+                kind: ExprKind::Cast { ty, expr: Box::new(expr) },
+                ty: None,
+                span: self.spanned(lo),
+            });
         }
         self.parse_unary()
     }

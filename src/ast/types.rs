@@ -292,6 +292,9 @@ pub enum ExprKind {
     // `callee(args)` — a direct call to a named function (6.5.2.2); calls
     // through a function-pointer expression are a later item.
     Call { callee: String, args: Vec<Expr> },
+    // `(ty) expr` — an explicit conversion (6.5.4); lowering feeds it through
+    // the same conversion engine as the implicit ones.
+    Cast { ty: CType, expr: Box<Expr> },
 }
 
 /// Binary operators (FE-19). The full set is defined; only `+ - * / %` are
