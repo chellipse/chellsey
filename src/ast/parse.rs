@@ -2,7 +2,7 @@ use anyhow::anyhow;
 
 use super::types::*;
 use crate::diagnostic::{Error, Span};
-use crate::lexer::{Kw, Punct, Token, TokenKind};
+use crate::lexer::{CharEnc, Kw, Punct, Token, TokenKind};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -706,8 +706,16 @@ impl Parser {
             TokenKind::FloatConst { .. } => {
                 Err(self.error("floating-point literals are not yet supported (TBD)"))
             }
-            TokenKind::CharConst { .. } => {
-                Err(self.error("character constants are not yet supported (TBD)"))
+            // A character constant is an `int` (6.4.4.4p10); the lexer already
+            // computed its value. (Binding `Plain` keeps a future encoding
+            // from silently flowing through this arm.)
+            TokenKind::CharConst { value, enc: CharEnc::Plain } => {
+                self.consume(1);
+                Ok(Expr {
+                    kind: ExprKind::IntLit { value: value as i64 as u64, ty: CType::INT },
+                    ty: None,
+                    span: self.spanned(lo),
+                })
             }
             TokenKind::StrLit { .. } => {
                 Err(self.error("string literals are not yet supported (TBD)"))

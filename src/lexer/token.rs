@@ -243,7 +243,9 @@ pub enum TokenKind {
         suf: FloatSuf,
     },
     CharConst {
-        value: u32,
+        // the constant's `int` value (6.4.4.4p13): a numeric escape is taken
+        // through `char` (signed here), so `'\xff'` is -1
+        value: i32,
         enc: CharEnc,
     },
     /// decoded raw bytes (escapes resolved, UCNs UTF-8-encoded), not text;
@@ -642,8 +644,13 @@ impl PPToken {
             return Err(self.err("character constant must hold exactly one character (TBD)"));
         };
         let value = match c {
-            CChar::Byte(b) => *b as u32,
-            CChar::Char(c) => *c as u32,
+            // a numeric escape is a raw byte; the constant's value is that
+            // byte taken through `char` (signed) into `int` (6.4.4.4p13)
+            CChar::Byte(b) => *b as i8 as i32,
+            CChar::Char(c) if c.is_ascii() => *c as i32,
+            // gcc packs a non-ASCII character's multibyte UTF-8 encoding into
+            // the `int` (with -Wmultichar); not modelled
+            CChar::Char(_) => return Err(self.err("non-ASCII character constants are TBD")),
         };
         Ok(TokenKind::CharConst { value, enc: CharEnc::Plain })
     }
