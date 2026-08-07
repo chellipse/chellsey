@@ -667,27 +667,21 @@ impl PPToken {
         Ok(TokenKind::StrLit { value, enc: StrEnc::Plain })
     }
 
-    /// Integer-suffix per 6.4.4.1: at most one `u`/`U` and one length
-    /// suffix, in either order. The valid spellings are enumerated raw —
-    /// the doubled spellings are same-case only (`ll`/`LL`, never `lL`),
-    /// which bounds the table, and mixed case then falls out as invalid
-    /// with no casing logic at all.
-    #[rustfmt::skip]
     fn parse_int_suf(&self, s: &str) -> Result<IntSuf, Error> {
-        let (unsigned, len) = match s {
-            ""                                                        => (false, IntLen::Int),
-            "u" | "U"                                                 => (true,  IntLen::Int),
-            "l" | "L"                                                 => (false, IntLen::Long),
-            "ul" | "uL" | "Ul" | "UL" | "lu" | "lU" | "Lu" | "LU"     => (true,  IntLen::Long),
-            "ll" | "LL"                                               => (false, IntLen::LongLong),
-            "ull" | "uLL" | "Ull" | "ULL" | "llu" | "llU" | "LLu" | "LLU" => (true, IntLen::LongLong),
-            // valid C23, distinct from a junk suffix — but nothing downstream
-            // models `_BitInt`, so a clear error beats a silently-wrong `int`
-            "wb" | "WB" | "uwb" | "uWB" | "Uwb" | "UWB" | "wbu" | "wbU" | "WBu" | "WBU" => {
-                return Err(self.err("`wb` (`_BitInt`) integer constants are TBD"));
+        let s = s.to_lowercase();
+        let len = match s.as_str() {
+            "" => IntLen::Int,
+            "u" => IntLen::Int,
+            "l" => IntLen::Long,
+            "ul" | "lu" => IntLen::Long,
+            "ll" | "LL" => IntLen::LongLong,
+            "ull" | "llu" => IntLen::LongLong,
+            "wb" | "uwb" | "wbu" => {
+                return Err(self.err("_BitInt constants are now implemented!"));
             }
-            _ => return Err(self.err(format!("invalid integer constant suffix `{s}`"))),
+            _ => return Err(self.err(format!("invalid int constant suffix {s:?}"))),
         };
+        let unsigned = s.contains('u');
         Ok(IntSuf { unsigned, len })
     }
 }
