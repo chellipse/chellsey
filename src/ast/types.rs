@@ -144,13 +144,11 @@ impl fmt::Display for CType {
     }
 }
 
-#[derive(Debug)]
 pub struct TranslationUnit {
     pub decls: Vec<ExtDecl>,
     pub span: Span,
 }
 
-#[derive(Debug)]
 pub struct ExtDecl {
     pub kind: ExtDeclKind,
     pub span: Span,
@@ -158,7 +156,6 @@ pub struct ExtDecl {
 
 /// One formal parameter of a function declarator. The name is optional in a
 /// prototype (`int f(int);`); sema requires it in a definition.
-#[derive(Debug)]
 pub struct Param {
     pub ty: CType,
     pub name: Option<String>,
@@ -179,7 +176,6 @@ pub enum ExtDeclKind {
     FuncDecl { ret: CType, ident: String, params: Vec<Param>, varargs: bool },
 }
 
-#[derive(Debug)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
@@ -255,7 +251,6 @@ pub enum StmtKind {
     Empty,
 }
 
-#[derive(Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     /// The expression's type, computed and filled in by sema's pass 2 (§2.7:
@@ -329,6 +324,47 @@ pub enum UnOp {
     Neg,
     Not,
     BitNot,
+}
+
+// Debug for the span-carrying nodes is manual for one reason: the dumps skip
+// the `span` field (as `Token`'s Debug does) — offsets are noise next to the
+// tree structure.
+impl fmt::Debug for TranslationUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TranslationUnit")
+            .field("decls", &self.decls)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExtDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtDecl").field("kind", &self.kind).finish()
+    }
+}
+
+impl fmt::Debug for Param {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Param")
+            .field("ty", &self.ty)
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Stmt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stmt").field("kind", &self.kind).finish()
+    }
+}
+
+impl fmt::Debug for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Expr")
+            .field("kind", &self.kind)
+            .field("ty", &self.ty)
+            .finish()
+    }
 }
 
 /// Pick the type of an integer literal from its value, suffix, and base
