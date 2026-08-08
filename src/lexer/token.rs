@@ -674,10 +674,10 @@ impl PPToken {
             "u" => IntLen::Int,
             "l" => IntLen::Long,
             "ul" | "lu" => IntLen::Long,
-            "ll" | "LL" => IntLen::LongLong,
+            "ll" => IntLen::LongLong,
             "ull" | "llu" => IntLen::LongLong,
             "wb" | "uwb" | "wbu" => {
-                return Err(self.err("_BitInt constants are now implemented!"));
+                return Err(self.err("_BitInt constants are not implemented!"));
             }
             _ => return Err(self.err(format!("invalid int constant suffix {s:?}"))),
         };
