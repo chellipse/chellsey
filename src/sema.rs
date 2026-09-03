@@ -487,18 +487,14 @@ impl Sema {
                 check_assign(&lt, rhs)?;
                 lt
             }
-            ExprKind::CompoundAssign { lhs, rhs, .. } => {
-                // The same modifiable-lvalue rule as `=` (6.5.16.2). The target
-                // stays a named object for now: a `*p` target needs the
-                // evaluate-the-lvalue-once desugaring to hold an address.
+            ExprKind::CompoundAssign { op, lhs, rhs } => {
+                // The same modifiable-lvalue rule as `=` (6.5.16.2). A pointer
+                // lhs is valid only under `+=`/`-=` with an integer rhs
+                // (stepping by element); a pointer rhs never converts into an
+                // arithmetic lhs.
                 if !is_lvalue(&lhs.kind) {
                     return Err(span.into_error(anyhow!(
                         "left operand of compound assignment is not assignable"
-                    )));
-                }
-                if matches!(lhs.kind, ExprKind::Deref { .. }) {
-                    return Err(span.into_error(anyhow!(
-                        "compound assignment through `*` is not yet supported (TBD)"
                     )));
                 }
                 self.check_expr(lhs)?;
@@ -507,36 +503,30 @@ impl Sema {
                     lhs.ty.as_ref().expect("just annotated"),
                     rhs.ty.as_ref().expect("just annotated"),
                 );
-                // `p += n` is pointer arithmetic — the next batch
-                if l.is_pointer() || r.is_pointer() {
+                let ok = if l.is_pointer() {
+                    matches!(op, BinOp::Add | BinOp::Sub) && r.is_integer()
+                } else {
+                    !r.is_pointer()
+                };
+                if !ok {
                     return Err(
-                        span.into_error(anyhow!("pointer arithmetic is not yet supported (TBD)"))
+                        span.into_error(anyhow!("invalid operands to `{op}=` (`{l}` and `{r}`)"))
                     );
                 }
                 l.clone()
             }
             ExprKind::IncDec { expr: inner, .. } => {
-                // `++`/`--` need a modifiable lvalue (6.5.2.4/6.5.3.1); like
-                // compound assignment, a `*p` target is TBD. The result is the
-                // operand's type, whether prefix (new value) or postfix (old).
+                // `++`/`--` need a modifiable lvalue (6.5.2.4/6.5.3.1); a
+                // pointer operand steps by one element (6.5.6). The result is
+                // the operand's type, whether prefix (new value) or postfix
+                // (old).
                 if !is_lvalue(&inner.kind) {
                     return Err(
                         span.into_error(anyhow!("operand of `++`/`--` is not a modifiable lvalue"))
                     );
                 }
-                if matches!(inner.kind, ExprKind::Deref { .. }) {
-                    return Err(span
-                        .into_error(anyhow!("`++`/`--` through `*` is not yet supported (TBD)")));
-                }
                 self.check_expr(inner)?;
-                let t = inner.ty.clone().expect("just annotated");
-                // `p++` steps by the pointee size — pointer arithmetic, TBD
-                if t.is_pointer() {
-                    return Err(
-                        span.into_error(anyhow!("pointer arithmetic is not yet supported (TBD)"))
-                    );
-                }
-                t
+                inner.ty.clone().expect("just annotated")
             }
             ExprKind::Comma { lhs, rhs } => {
                 // `lhs` is evaluated and discarded; the result is `rhs` (6.5.17).
@@ -608,26 +598,32 @@ impl Sema {
                     rhs.ty.as_ref().expect("just annotated"),
                 );
                 // Pointer operands: same-typed comparisons (equality also
-                // against a null pointer constant, 6.5.9p2) and the
-                // truth-testing `&&`/`||` work; `p + n` et al. are pointer
-                // arithmetic — the next batch.
+                // against a null pointer constant, 6.5.9p2), the truth-testing
+                // `&&`/`||`, and the additive operators (6.5.6) — pointer
+                // plus/minus integer yields the pointer's type, and the
+                // difference of two same-typed pointers is `ptrdiff_t`
+                // (`long` on this target). Everything else is invalid.
                 if l.is_pointer() || r.is_pointer() {
-                    let ok = match op {
-                        BinOp::LogAnd | BinOp::LogOr => true,
-                        BinOp::Eq | BinOp::Ne => l == r || is_npc(lhs) || is_npc(rhs),
-                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => l == r,
+                    let rty = match op {
+                        BinOp::LogAnd | BinOp::LogOr => CType::INT,
+                        BinOp::Eq | BinOp::Ne if l == r || is_npc(lhs) || is_npc(rhs) => CType::INT,
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge if l == r => CType::INT,
+                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                            return Err(span.into_error(anyhow!(
+                                "comparison of incompatible types `{l}` and `{r}`"
+                            )));
+                        }
+                        BinOp::Add if l.is_pointer() && r.is_integer() => l.clone(),
+                        BinOp::Add if l.is_integer() && r.is_pointer() => r.clone(),
+                        BinOp::Sub if l.is_pointer() && r.is_integer() => l.clone(),
+                        BinOp::Sub if l.is_pointer() && l == r => CType::LONG,
                         _ => {
                             return Err(span.into_error(anyhow!(
-                                "pointer arithmetic is not yet supported (TBD)"
+                                "invalid operands to binary `{op}` (`{l}` and `{r}`)"
                             )));
                         }
                     };
-                    if !ok {
-                        return Err(span.into_error(anyhow!(
-                            "comparison of incompatible types `{l}` and `{r}`"
-                        )));
-                    }
-                    expr.ty = Some(CType::INT);
+                    expr.ty = Some(rty);
                     return Ok(());
                 }
                 match op {

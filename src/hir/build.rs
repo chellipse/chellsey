@@ -29,6 +29,14 @@ struct TV {
     ty: CType,
 }
 
+/// A resolved lvalue: where a read loads from and a write stores to. `Mem`
+/// holds an already-evaluated pointer, so a read-modify-write (`*p += n`,
+/// `(*p)++`) computes the address exactly once (6.5.16.2p3).
+enum Place {
+    Slot(LocalId),
+    Mem(Value),
+}
+
 pub fn build(unit: &TranslationUnit, info: &ProgramInfo) -> Result<Program> {
     let mut funcs = Vec::new();
     for decl in &unit.decls {
@@ -233,6 +241,161 @@ impl<'a> FnGen<'a> {
             InstKind::StoreLocal { local, val, ty, volatile: false },
             span,
         );
+    }
+
+    /// Resolve an lvalue expression to a place, evaluating any address
+    /// computation now (and only once).
+    fn place(&mut self, items: &mut Vec<Item>, lv: &Expr) -> Result<Place> {
+        match &lv.kind {
+            ExprKind::Ident { name } => Ok(Place::Slot(self.lookup(name))),
+            ExprKind::Deref { expr: p } => Ok(Place::Mem(self.expr(items, p)?.val)),
+            _ => Err(err(&lv.span, "internal: non-lvalue past sema")),
+        }
+    }
+
+    fn read_place(
+        &mut self,
+        items: &mut Vec<Item>,
+        place: &Place,
+        ty: Type,
+        span: &Span,
+    ) -> TempId {
+        match place {
+            Place::Slot(local) => self.load(items, *local, ty, span),
+            Place::Mem(addr) => {
+                let dst = self.new_temp();
+                self.emit(
+                    items,
+                    InstKind::LoadPtr { dst, addr: *addr, ty, volatile: false },
+                    span,
+                );
+                dst
+            }
+        }
+    }
+
+    fn write_place(
+        &mut self,
+        items: &mut Vec<Item>,
+        place: &Place,
+        val: Value,
+        ty: Type,
+        span: &Span,
+    ) {
+        match place {
+            Place::Slot(local) => self.store(items, *local, val, ty, span),
+            Place::Mem(addr) => self.emit(
+                items,
+                InstKind::StorePtr { addr: *addr, val, ty, volatile: false },
+                span,
+            ),
+        }
+    }
+
+    /// The element-scaled byte offset for pointer arithmetic: the index's
+    /// canonical 64-bit form *is* its mathematical value (§2.3), so scaling is
+    /// a plain full-width multiply — negative and unsigned indexes alike wrap
+    /// exactly as the address computation they feed does.
+    fn scale_index(
+        &mut self,
+        items: &mut Vec<Item>,
+        idx: Value,
+        ptr_ty: &CType,
+        span: &Span,
+    ) -> Value {
+        let size = ptr_ty
+            .pointee()
+            .expect("pointer arithmetic on a pointer")
+            .size() as i64;
+        if size == 1 {
+            return idx;
+        }
+        if let Value::Const(c) = idx {
+            return Value::Const(c.wrapping_mul(size));
+        }
+        let dst = self.new_temp();
+        self.emit(
+            items,
+            InstKind::IBin {
+                dst,
+                op: IBinOp::Mul,
+                lhs: idx,
+                rhs: Value::Const(size),
+                ty: Type::I64,
+                flags: UbFlags::default(),
+            },
+            span,
+        );
+        Value::Temp(dst)
+    }
+
+    /// The additive operators over a pointer (6.5.6): `p ± n` in whole
+    /// elements, and `p - q` back down to an element count. Every result is a
+    /// full-register value — no recanon.
+    fn ptr_arith(
+        &mut self,
+        items: &mut Vec<Item>,
+        op: BinOp,
+        l: TV,
+        r: TV,
+        ty: CType,
+        span: &Span,
+    ) -> Result<TV> {
+        // `p - q` (p9): the byte distance, divided — exactly, when the
+        // operands satisfy the same-object constraint — by the element size.
+        // `ptrdiff_t` is signed, hence the signed division.
+        if l.ty.is_pointer() && r.ty.is_pointer() {
+            let size = l.ty.pointee().expect("just matched").size() as i64;
+            let diff = self.new_temp();
+            self.emit(
+                items,
+                InstKind::IBin {
+                    dst: diff,
+                    op: IBinOp::Sub,
+                    lhs: l.val,
+                    rhs: r.val,
+                    ty: Type::I64,
+                    flags: UbFlags::default(),
+                },
+                span,
+            );
+            let dst = self.new_temp();
+            self.emit(
+                items,
+                InstKind::IBin {
+                    dst,
+                    op: IBinOp::SDiv,
+                    lhs: Value::Temp(diff),
+                    rhs: Value::Const(size),
+                    ty: Type::I64,
+                    flags: UbFlags::default(),
+                },
+                span,
+            );
+            return Ok(TV { val: Value::Temp(dst), ty });
+        }
+        // `p + n` / `n + p` / `p - n`: only `+` commutes — for `-` sema
+        // guarantees the pointer is the left operand.
+        let (p, i) = if l.ty.is_pointer() { (l, r) } else { (r, l) };
+        let off = self.scale_index(items, i.val, &p.ty, span);
+        let dst = self.new_temp();
+        self.emit(
+            items,
+            InstKind::IBin {
+                dst,
+                op: if op == BinOp::Add {
+                    IBinOp::Add
+                } else {
+                    IBinOp::Sub
+                },
+                lhs: p.val,
+                rhs: off,
+                ty: Type::Ptr,
+                flags: UbFlags::default(),
+            },
+            span,
+        );
+        Ok(TV { val: Value::Temp(dst), ty })
     }
 
     /// The items of a compound statement, in their own scope.
@@ -695,32 +858,8 @@ impl<'a> FnGen<'a> {
             ExprKind::Assign { lhs, rhs } => {
                 let v = self.expr(items, rhs)?;
                 let v = self.convert(items, v, &ty, &e.span);
-                match &lhs.kind {
-                    ExprKind::Ident { name } => {
-                        let local = self.lookup(name);
-                        self.store(items, local, v.val, machine_ty(&ty), &e.span);
-                    }
-                    // `*p = v`: evaluate the pointer, store through it
-                    ExprKind::Deref { expr: p } => {
-                        let addr = self.expr(items, p)?;
-                        self.emit(
-                            items,
-                            InstKind::StorePtr {
-                                addr: addr.val,
-                                val: v.val,
-                                ty: machine_ty(&ty),
-                                volatile: false,
-                            },
-                            &e.span,
-                        );
-                    }
-                    _ => {
-                        return Err(err(
-                            &lhs.span,
-                            "internal: non-lvalue assignment target past sema",
-                        ));
-                    }
-                }
+                let place = self.place(items, lhs)?;
+                self.write_place(items, &place, v.val, machine_ty(&ty), &e.span);
                 Ok(TV { val: v.val, ty })
             }
             // `&x` (6.5.3.2): the address of the named object's slot. `&*p`
@@ -757,20 +896,39 @@ impl<'a> FnGen<'a> {
                 );
                 Ok(TV { val: Value::Temp(dst), ty })
             }
-            // `lhs op= rhs` (6.5.16.2): load the lvalue once, combine it with
-            // the rhs under `op` *in the common computation type*, convert the
-            // result back to the lvalue's type, store it, and yield it. `lhs`
-            // is an ident here, so "evaluate the lvalue once" is one lookup.
+            // `lhs op= rhs` (6.5.16.2): resolve the lvalue once, load it,
+            // combine it with the rhs under `op` *in the common computation
+            // type*, convert the result back to the lvalue's type, store it,
+            // and yield it.
             ExprKind::CompoundAssign { op, lhs, rhs } => {
-                let ExprKind::Ident { name } = &lhs.kind else {
-                    return Err(err(
-                        &lhs.span,
-                        "internal: non-lvalue compound-assignment target past sema",
-                    ));
-                };
-                let local = self.lookup(name);
-                let cur = self.load(items, local, machine_ty(&ty), &e.span);
+                let place = self.place(items, lhs)?;
+                let cur = self.read_place(items, &place, machine_ty(&ty), &e.span);
                 let r = self.expr(items, rhs)?;
+                // `p += n` / `p -= n` step by whole elements (6.5.6); the
+                // loaded pointer and the result are full-register values, so
+                // the conversion dance below doesn't apply
+                if ty.is_pointer() {
+                    let off = self.scale_index(items, r.val, &ty, &e.span);
+                    let dst = self.new_temp();
+                    self.emit(
+                        items,
+                        InstKind::IBin {
+                            dst,
+                            op: if *op == BinOp::Add {
+                                IBinOp::Add
+                            } else {
+                                IBinOp::Sub
+                            },
+                            lhs: Value::Temp(cur),
+                            rhs: off,
+                            ty: Type::Ptr,
+                            flags: UbFlags::default(),
+                        },
+                        &e.span,
+                    );
+                    self.write_place(items, &place, Value::Temp(dst), machine_ty(&ty), &e.span);
+                    return Ok(TV { val: Value::Temp(dst), ty });
+                }
                 // shifts promote each operand alone (6.5.7); the rest balance
                 // under the usual arithmetic conversions
                 let (common, rt) = match op {
@@ -800,23 +958,40 @@ impl<'a> FnGen<'a> {
                 let res = TV { val: Value::Temp(dst), ty: common };
                 let res = self.recanon(items, res, &e.span);
                 let res = self.convert(items, res, &ty, &e.span);
-                self.store(items, local, res.val, machine_ty(&ty), &e.span);
+                self.write_place(items, &place, res.val, machine_ty(&ty), &e.span);
                 Ok(TV { val: res.val, ty })
             }
             // `++x`/`x++` (6.5.3.1/6.5.2.4): `x += 1` / `x -= 1` in the common
-            // type of the lvalue and `int`, converted back on the store.
-            // Prefix's value is the updated one; postfix's the one loaded
-            // before the update.
+            // type of the lvalue and `int`, converted back on the store; a
+            // pointer steps by one element instead (6.5.6). Prefix's value is
+            // the updated one; postfix's the one loaded before the update.
             ExprKind::IncDec { pre, inc, expr } => {
-                let ExprKind::Ident { name } = &expr.kind else {
-                    return Err(err(
-                        &expr.span,
-                        "internal: non-lvalue `++`/`--` target past sema",
-                    ));
-                };
-                let local = self.lookup(name);
+                let place = self.place(items, expr)?;
+                let cur = self.read_place(items, &place, machine_ty(&ty), &e.span);
+                if ty.is_pointer() {
+                    let size = ty.pointee().expect("just matched").size() as i64;
+                    let next = self.new_temp();
+                    self.emit(
+                        items,
+                        InstKind::IBin {
+                            dst: next,
+                            op: if *inc { IBinOp::Add } else { IBinOp::Sub },
+                            lhs: Value::Temp(cur),
+                            rhs: Value::Const(size),
+                            ty: Type::Ptr,
+                            flags: UbFlags::default(),
+                        },
+                        &e.span,
+                    );
+                    self.write_place(items, &place, Value::Temp(next), machine_ty(&ty), &e.span);
+                    let val = if *pre {
+                        Value::Temp(next)
+                    } else {
+                        Value::Temp(cur)
+                    };
+                    return Ok(TV { val, ty });
+                }
                 let common = CType::usual_arith(&ty, &CType::INT);
-                let cur = self.load(items, local, machine_ty(&ty), &e.span);
                 let cv = TV { val: Value::Temp(cur), ty: ty.clone() };
                 let cv = self.convert(items, cv, &common, &e.span);
                 let next = self.new_temp();
@@ -835,7 +1010,7 @@ impl<'a> FnGen<'a> {
                 let res = TV { val: Value::Temp(next), ty: common };
                 let res = self.recanon(items, res, &e.span);
                 let res = self.convert(items, res, &ty, &e.span);
-                self.store(items, local, res.val, machine_ty(&ty), &e.span);
+                self.write_place(items, &place, res.val, machine_ty(&ty), &e.span);
                 let val = if *pre { res.val } else { Value::Temp(cur) };
                 Ok(TV { val, ty })
             }
@@ -982,6 +1157,12 @@ impl<'a> FnGen<'a> {
                         &e.span,
                     );
                     return Ok(TV { val: Value::Temp(dst), ty });
+                }
+                // Pointer `+`/`-` (6.5.6): scale the integer by the element
+                // size and add/sub full-width; `p - q` divides the byte
+                // distance back down to elements.
+                if l.ty.is_pointer() || r.ty.is_pointer() {
+                    return self.ptr_arith(items, *op, l, r, ty, &e.span);
                 }
                 // Arithmetic: `ty` (from sema) is the computation type — the
                 // UAC common type, or for shifts the promoted left operand,

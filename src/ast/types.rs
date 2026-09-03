@@ -31,6 +31,7 @@ pub enum CType {
 impl CType {
     pub const INT: CType = CType::Int { signed: true };
     pub const CHAR: CType = CType::Char { signed: true };
+    pub const LONG: CType = CType::Long { signed: true };
     pub const ULONG: CType = CType::Long { signed: false };
 
     /// Size in bytes (System V x86-64).
@@ -323,6 +324,31 @@ pub enum BinOp {
     BitXor,
     LogAnd,
     LogOr,
+}
+
+impl fmt::Display for BinOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Le => "<=",
+            BinOp::Ge => ">=",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::LogAnd => "&&",
+            BinOp::LogOr => "||",
+        })
+    }
 }
 
 /// Prefix operators that fold into a `Unary` node (FE-19). `*`/`&`/`++`/`--`

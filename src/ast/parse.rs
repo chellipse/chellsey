@@ -659,35 +659,47 @@ impl Parser {
         Ok(Expr { kind, ty: None, span: self.spanned(lo) })
     }
 
-    /// `parse_postfix` — a direct function call `f(args)` or a postfix
-    /// `++`/`--` (yielding the old value); subscripts are a later item.
+    /// `parse_postfix` — a chain of postfix operators on a primary: a direct
+    /// function call `f(args)`, a subscript, or a postfix `++`/`--` (yielding
+    /// the old value). `e1[e2]` is identical to `(*((e1)+(e2)))` (6.5.2.1p2)
+    /// and is built as exactly that pair of nodes.
     fn parse_postfix(&mut self) -> Result<Expr> {
         let lo = self.cursor;
-        let expr = self.parse_primary()?;
-        match self.peek().ok().map(|t| t.kind.clone()) {
-            Some(TokenKind::Punct(Punct::LParen)) => {
-                // The callee is a bare name in this subset — calling through an
-                // arbitrary expression (a function pointer) is a later item.
-                let ExprKind::Ident { name } = expr.kind else {
-                    return Err(self.error("only named functions can be called (TBD)"));
-                };
-                let args = self.parse_args()?;
-                let kind = ExprKind::Call { callee: name, args };
-                Ok(Expr { kind, ty: None, span: self.spanned(lo) })
-            }
-            Some(TokenKind::Punct(Punct::LBracket)) => {
-                Err(self.error("array subscripting is not yet supported (TBD)"))
-            }
-            Some(TokenKind::Punct(p @ (Punct::PlusPlus | Punct::MinusMinus))) => {
-                self.consume(1);
-                let kind = ExprKind::IncDec {
-                    pre: false,
-                    inc: p == Punct::PlusPlus,
-                    expr: Box::new(expr),
-                };
-                Ok(Expr { kind, ty: None, span: self.spanned(lo) })
-            }
-            _ => Ok(expr),
+        let mut expr = self.parse_primary()?;
+        loop {
+            let kind = match self.peek().ok().map(|t| t.kind.clone()) {
+                Some(TokenKind::Punct(Punct::LParen)) => {
+                    // The callee is a bare name in this subset — calling
+                    // through an arbitrary expression (a function pointer) is
+                    // a later item.
+                    let ExprKind::Ident { name } = expr.kind else {
+                        return Err(self.error("only named functions can be called (TBD)"));
+                    };
+                    let args = self.parse_args()?;
+                    ExprKind::Call { callee: name, args }
+                }
+                Some(TokenKind::Punct(Punct::LBracket)) => {
+                    self.consume(1);
+                    let index = self.parse_expr()?;
+                    self.consume_expect(TokenKind::Punct(Punct::RBracket))?;
+                    let sum = Expr {
+                        kind: ExprKind::Binary {
+                            op: BinOp::Add,
+                            lhs: Box::new(expr),
+                            rhs: Box::new(index),
+                        },
+                        ty: None,
+                        span: self.spanned(lo),
+                    };
+                    ExprKind::Deref { expr: Box::new(sum) }
+                }
+                Some(TokenKind::Punct(p @ (Punct::PlusPlus | Punct::MinusMinus))) => {
+                    self.consume(1);
+                    ExprKind::IncDec { pre: false, inc: p == Punct::PlusPlus, expr: Box::new(expr) }
+                }
+                _ => return Ok(expr),
+            };
+            expr = Expr { kind, ty: None, span: self.spanned(lo) };
         }
     }
 
